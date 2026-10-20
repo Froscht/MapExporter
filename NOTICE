@@ -1,0 +1,24 @@
+MapExporter
+===========
+
+Copyright 2026 froscht (https://github.com/froscht)
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party code
+----------------
+
+Parts of this project are derived from CUE4Parse
+(https://github.com/FabianFG/CUE4Parse), Copyright (c) FabianFG and contributors,
+licensed under the Apache License, Version 2.0 (see LICENSE):
+
+  - arcpak/crypto.py, arcpak/theia.c
+      Theia container decryption, ported from CUE4Parse's TheiaDecryptor (C# -> Python / C).
+  - arcpak/mesh.py
+      Layout of the cooked StaticMesh render data, transcribed from CUE4Parse and adapted.
+
+The ported code was rewritten for this project and modified (keystream anchoring per file
+position, native C kernel, integration into the IoStore / pak readers).
+
+Unreal Engine is a trademark of Epic Games, Inc. ARC Raiders is a trademark of Embark Studios AB.
+This project is not affiliated with or endorsed by either company.

@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# exports and generated data
+out/
+extracted/
+cache/
+
+# local settings (game path, AES keys, language)
+arcpak/settings.json
+
+# build leftovers of the Theia kernel
+arcpak/*.pdb
+arcpak/*.lib
+arcpak/*.exp

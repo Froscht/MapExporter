@@ -1,0 +1,6 @@
+pycryptodome
+numpy
+PyQt6
+pyqtgraph
+PyOpenGL
+Pillow
