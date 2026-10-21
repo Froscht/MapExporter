@@ -167,6 +167,19 @@ def material_names(raw, pkg, me):
     return out
 REGION = None                        # (cell mask array, x0, y0, cell size) with --crop
 REGION_EXTRA = [None, None]          # (region +1 cell, region bbox x0,y0,x1,y1)
+REGION_SUM = [None, None]            # integral images (zero border) of REGION[0] and REGION_EXTRA[0]
+
+
+def _integral(a):
+    """Prefix sums with a zero row/column: rect sum = S[b1+1,a1+1] - S[b0,a1+1] - S[b1+1,a0] + S[b0,a0]."""
+    import numpy as np
+    S = np.zeros((a.shape[0] + 1, a.shape[1] + 1), np.int64)
+    S[1:, 1:] = np.cumsum(np.cumsum(a, axis=0), axis=1)
+    return S
+
+
+def _rect_sum(S, j0, i0, j1, i1):
+    return S[j1 + 1, i1 + 1] - S[j0, i1 + 1] - S[j1 + 1, i0] + S[j0, i0]
 
 
 def gltf_mesh(key):
@@ -198,25 +211,72 @@ def in_region(lo, hi):
     j0 = max(int((lo[1] - y0) // c) - 1, 0); j1 = min(int((hi[1] - y0) // c) + 1, ny - 1)
     if i0 > i1 or j0 > j1:
         return False
+    S = REGION_SUM[0]
+    if S is not None:                       # integral image: rect sum > 0 is exactly .any() on the rect
+        return bool(_rect_sum(S, j0, i0, j1, i1) > 0)
     return bool(R[j0:j1 + 1, i0:i1 + 1].any())
+
+
+def region_keep_mask(lo_a, hi_a):
+    """Vectorized in_region() for many bboxes ((n, 3) numpy arrays). Exact: fast decisions come from
+    the integral image over each bbox's cell rect, widened by one cell beyond in_region's margined rect
+    — a superset of it (absorbs any off-by-one between numpy and Python floordiv) — so "all cells set"
+    implies in_region's any() and "no cell set" implies its negation. Only bboxes straddling the region
+    border are tested one by one with in_region()."""
+    import numpy as np
+    R, x0, y0, c = REGION
+    S = REGION_SUM[0] if REGION_SUM[0] is not None else _integral(R)
+    ny, nx = R.shape
+    i0 = np.floor_divide(lo_a[:, 0] - x0, c).astype(np.int64) - 2     # in_region's -1 margin + 1 cell slack
+    i1 = np.floor_divide(hi_a[:, 0] - x0, c).astype(np.int64) + 2
+    j0 = np.floor_divide(lo_a[:, 1] - y0, c).astype(np.int64) - 2
+    j1 = np.floor_divide(hi_a[:, 1] - y0, c).astype(np.int64) + 2
+    a0 = np.clip(i0, 0, nx - 1); a1 = np.clip(i1, 0, nx - 1)
+    b0 = np.clip(j0, 0, ny - 1); b1 = np.clip(j1, 0, ny - 1)
+    empty = (i1 < 0) | (i0 > nx - 1) | (j1 < 0) | (j0 > ny - 1) | (a0 > a1) | (b0 > b1)
+    tot = _rect_sum(S, b0, a0, b1, a1)
+    keep = (~empty) & (tot == (a1 - a0 + 1) * (b1 - b0 + 1))
+    straddle = (~keep) & (~empty) & (tot > 0)
+    if straddle.any():
+        lo_l, hi_l = lo_a.tolist(), hi_a.tolist()
+        for k in np.flatnonzero(straddle):
+            keep[k] = in_region(lo_l[k], hi_l[k])
+    return keep
 
 
 LOCAL = {}                           # mesh key -> (vertices, centroids) as numpy (--crop)
 
 
-def node_in_region(key, M, pos=None):
-    """--crop rule for map nodes (see module docstring). pos: bent spline vertices instead of GEO."""
+def node_in_region(key, M, pos=None, wbox=None):
+    """--crop rule for map nodes (see module docstring). pos: bent spline vertices instead of GEO.
+    wbox: the caller's world bbox (world_aabb of the local bbox) — allows an exact shortcut."""
     import numpy as np
     R, x0, y0, c = REGION
     D, RB = REGION_EXTRA
+    SD = REGION_SUM[1]
+    if wbox is not None and SD is not None:
+        # Shortcut: every vertex (and every triangle centroid, being convex) lies inside wbox, the
+        # conservative rotated-box bounds of the local bbox. Cell math in numpy floordiv — like the
+        # vertex math below — keeps the widened cell rect a superset of all vertex cells; if it lies
+        # fully inside the grid and all its dilated cells are set, the vertex test must pass. The
+        # Kulisse test cannot fire either: the tight box extent ≤ wbox extent ≤ limit - 1e-6 leaves
+        # more slack (1e-6 cm) than any float roundoff at map scale (≤1e-10 cm).
+        wlo, whi = wbox
+        ny, nx = D.shape
+        i0 = int((np.float64(wlo[0]) - x0) // c) - 1; i1 = int((np.float64(whi[0]) - x0) // c) + 1
+        j0 = int((np.float64(wlo[1]) - y0) // c) - 1; j1 = int((np.float64(whi[1]) - y0) // c) + 1
+        if (max(whi[0] - wlo[0], whi[1] - wlo[1]) + 1e-6 < 2 * max(RB[2] - RB[0], RB[3] - RB[1])
+                and i0 >= 0 and j0 >= 0 and i1 < nx and j1 < ny
+                and _rect_sum(SD, j0, i0, j1, i1) == (i1 - i0 + 1) * (j1 - j0 + 1)):
+            return True
     if pos is None:
         if key not in LOCAL:
-            P = np.array(GEO[key][1]); I = GEO[key][2]
-            LOCAL[key] = np.vstack([P, P[np.array(I).reshape(-1, 3)].mean(1)]) if len(I) % 3 == 0 else P
+            P = np.asarray(GEO[key][1]); I = np.asarray(GEO[key][2])
+            LOCAL[key] = np.vstack([P, P[I.reshape(-1, 3)].mean(1)]) if len(I) % 3 == 0 else P
         pts = LOCAL[key]
     else:
-        P = np.array(pos); I = GEO[key][2]
-        pts = np.vstack([P, P[np.array(I).reshape(-1, 3)].mean(1)])
+        P = np.asarray(pos); I = np.asarray(GEO[key][2])
+        pts = np.vstack([P, P[I.reshape(-1, 3)].mean(1)])
     A = np.array(M)[:3]
     W = pts @ A[:, :3].T + A[:, 3]
     lo, hi = W.min(0), W.max(0)
@@ -466,22 +526,26 @@ def landscapes():
         pos, idx, nrm, st = mesh.build(comps, root=root, s=sc[0], zs=sc[2])
         if CROP:
             # keep a triangle if its bbox touches the region; renumber vertices
-            keep, remap, P2, N2 = [], {}, [], []
-            for t in range(0, len(idx), 3):
-                tri = idx[t:t + 3]
-                lo = [min(pos[v][k] for v in tri) for k in range(3)]
-                hi = [max(pos[v][k] for v in tri) for k in range(3)]
-                if not in_region(lo, hi):
-                    continue
-                for v in tri:
-                    if v not in remap:
-                        remap[v] = len(P2)
-                        P2.append(pos[v]); N2.append(nrm[v])
-                    keep.append(remap[v])
-            cnt["Zuschnitt: Terrain-Dreiecke entfernt"] += len(idx) // 3 - len(keep) // 3
-            pos, idx, nrm = P2, keep, N2
-            st = dict(st, vertices=len(pos), dreiecke=len(idx) // 3)
-            if not idx:
+            import numpy as np
+            PA, NI, NA = np.asarray(pos), np.asarray(idx, dtype=np.int64), np.asarray(nrm)
+            tri = NI.reshape(-1, 3)
+            B = PA[tri]                                       # (ntri, 3, 3) vertex positions per triangle
+            keep = region_keep_mask(B.min(1), B.max(1))
+            sel = tri[keep].ravel()                           # kept vertices in triangle order
+            if sel.size:
+                order = np.argsort(sel, kind="stable")        # first appearance == dict insertion order
+                srt = sel[order]
+                neu = np.concatenate(([True], srt[1:] != srt[:-1]))
+                vals = srt[neu][np.argsort(order[neu], kind="stable")]
+                new_id = np.full(len(PA), -1, dtype=np.int64)
+                new_id[vals] = np.arange(len(vals), dtype=np.int64)
+                idx = new_id[sel]
+            else:
+                vals, idx = np.empty(0, np.int64), np.empty(0, np.int64)
+            cnt["Zuschnitt: Terrain-Dreiecke entfernt"] += len(NI) // 3 - len(sel) // 3
+            pos, nrm = PA[vals], NA[vals]
+            st = dict(st, vertices=len(vals), dreiecke=len(idx) // 3)
+            if len(idx) == 0:
                 continue
         gi = glb.add_mesh(f"Landscape {game.stem_of(p)}", pos, idx,
                           [(0, 0, st["dreiecke"], 0, st["vertices"] - 1)], nrm)
@@ -504,6 +568,7 @@ def main():
         D[1:, :] |= R[:-1, :]; D[:-1, :] |= R[1:, :]; D[:, 1:] |= R[:, :-1]; D[:, :-1] |= R[:, 1:]
         rx, ry = np.where(R.any(0))[0], np.where(R.any(1))[0]
         REGION_EXTRA[:] = [D, (x0 + rx.min() * c, y0 + ry.min() * c, x0 + (rx.max() + 1) * c, y0 + (ry.max() + 1) * c)]
+        REGION_SUM[:] = [_integral(R), _integral(D)]   # rect queries: in_region and the node shortcut
         cnt["Zuschnitt: Region-Zellen"] = int(R.sum())
     with open(SRC, encoding="utf-8") as fh:
         n_zeilen = sum(1 for _ in fh)
@@ -540,14 +605,17 @@ def main():
         M = [r["world"][0:4], r["world"][4:8], r["world"][8:12], r["world"][12:16]]
         sg = spline_geo(key, r) if r.get("spline_params") else None
         if sg:
-            lo = [min(p[k] for p in sg[1]) for k in range(3)]
-            hi = [max(p[k] for p in sg[1]) for k in range(3)]
+            # Python floats (not numpy scalars): in_region's // cell math must behave like before
+            lo = [float(min(p[k] for p in sg[1])) for k in range(3)]
+            hi = [float(max(p[k] for p in sg[1])) for k in range(3)]
         else:
             b = GEO[key][6]
             lo, hi = [b[k] - b[3 + k] for k in range(3)], [b[k] + b[3 + k] for k in range(3)]
-        if CROP and not (in_region(*world_aabb(M, lo, hi)) and node_in_region(key, M, sg[1] if sg else None)):
-            cnt["Zuschnitt: Knoten außerhalb entfernt"] += 1
-            continue
+        if CROP:
+            wb = world_aabb(M, lo, hi)
+            if not (in_region(*wb) and node_in_region(key, M, sg[1] if sg else None, wb)):
+                cnt["Zuschnitt: Knoten außerhalb entfernt"] += 1
+                continue
         gi = glb.add_mesh(*sg[:6], mat_names=sg[6]) if sg else gltf_mesh(key)
         glb.add_node(gi, name=r["name"], matrix=ut.to_gltf_matrix(M))
         cnt["Knoten gesetzt"] += 1

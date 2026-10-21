@@ -224,7 +224,7 @@ def _load_static(gpath, raw, pkg, e):
 def transformed(md: MeshData, T: ut.Transform, name=None) -> MeshData:
     """Copy of a mesh with positions and normals transformed (UE coordinates)."""
     rot = ut.Transform(T.r, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
-    nrm = [rot.apply(n) for n in md.nrm] if md.nrm else None
+    nrm = [tuple(rot.apply(n)) for n in md.nrm] if md.nrm is not None else None
     out = MeshData(name or md.name, [T.apply(p) for p in md.pos], md.idx, md.sections, nrm, md.uv, md.materials,
                    md.material_paths, md.textures, md.colors)
     out.rigid_bone = md.rigid_bone

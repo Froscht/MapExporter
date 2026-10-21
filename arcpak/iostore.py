@@ -8,6 +8,8 @@
 """
 import ctypes
 import ctypes.util
+import hashlib
+import pickle
 import struct
 import zlib
 from pathlib import Path
@@ -145,11 +147,38 @@ def ecb_decrypt(key, data):
     return AES.new(key, AES.MODE_ECB).decrypt(data[:len(data) // 16 * 16])
 
 
+# Parsed container tables are cached on disk (cache/utoc_<name>_<fp>.pkl) keyed by the .utoc's
+# mtime_ns+size: mounting 36 containers costs ~1 s in pure Python, loading the pickles ~0.3 s.
+# A changed .utoc produces a new fingerprint and the stale cache file for that container is removed.
+_CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
+_TABLE_ATTRS = ("version", "nchunks", "nblocks", "block_entry_size", "nmethods",
+                "method_name_length", "cbsize", "dir_size", "npartitions", "container_id",
+                "chunk_offsets", "flags", "container_guid", "partition_size",
+                "seeds", "no_header", "blocks", "methods", "mount_point", "entries",
+                "directoryless")
+
+
+def _tables_cache_path(utoc_path: Path, st) -> Path:
+    fp = hashlib.sha1(f"{utoc_path}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:12]
+    return _CACHE_DIR / f"utoc_{utoc_path.stem}_{fp}.pkl"
+
+
 class IoStoreContainer:
     def __init__(self, utoc_path: Path, game: str = "arcraiders", hardcoded_key: bytes = None):
         self.path = utoc_path
         self.base = utoc_path.name[:-5]
         self.ucas_path = utoc_path.with_suffix(".ucas")
+        self._theia = None
+        self._ucas = None
+        use_cache = hardcoded_key is None              # a custom key would change the parse
+        if use_cache:
+            st = utoc_path.stat()
+            cp = _tables_cache_path(utoc_path, st)
+            try:
+                self.__dict__.update(pickle.loads(cp.read_bytes()))
+                return
+            except (OSError, EOFError, pickle.UnpicklingError):
+                pass                                   # missing/stale cache: parse and store it
         raw = utoc_path.read_bytes()
         (self.version, _r0, _r1, hdrsz, self.nchunks, self.nblocks, self.block_entry_size,
          self.nmethods, self.method_name_length, self.cbsize, self.dir_size,
@@ -172,13 +201,23 @@ class IoStoreContainer:
         else:
             raise ValueError(f"{utoc_path.name}: cannot parse ({last_err})")
 
-        self._theia = None
-        self._ucas = None
+        if use_cache:
+            try:
+                cp = _tables_cache_path(utoc_path, utoc_path.stat())
+                _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                for old in _CACHE_DIR.glob(f"utoc_{utoc_path.stem}_*.pkl"):
+                    if old != cp:
+                        old.unlink(missing_ok=True)    # superseded fingerprint
+                tmp = cp.with_suffix(".pkl.tmp")
+                tmp.write_bytes(pickle.dumps(
+                    {k: getattr(self, k) for k in _TABLE_ATTRS if hasattr(self, k)}, protocol=4))
+                tmp.replace(cp)
+            except OSError:
+                pass
 
     def _parse_body(self, body):
         pos = 144
-        self.chunk_ids = [body[pos + 12 * i: pos + 12 * i + 12].hex() for i in range(self.nchunks)]
-        pos += 12 * self.nchunks
+        pos += 12 * self.nchunks                       # chunk ids (12 bytes each): never read
         self.chunk_offsets = []
         for i in range(self.nchunks):
             b = body[pos + 10 * i: pos + 10 * i + 10]
@@ -378,18 +417,32 @@ def mount_directory(pak_dir: str | Path, game: str = "arcraiders") -> list[IoSto
 
 # ---------- path index ----------
 
+_INDEX_CACHE: dict = {}
+
+
 def path_index(containers, substr: str = "", exts=None) -> dict:
     """{path: [(container, entry_id), …]} over ALL entries (non-packages too), split first.
-    Build it once and reuse it — that is the cheap way for scan loops."""
+    Build it once and reuse it — that is the cheap way for scan loops.
+
+    Memoized per (containers, substr, exts): callers must treat the returned dict and its
+    lists as read-only. Containers are visited in split_rank order, so each per-path list is
+    already split-first and needs no sorting (sorting every list cost more than the build)."""
+    key = (id(containers), substr, exts)
+    hit = _INDEX_CACHE.get(key)
+    if hit is not None and hit[0] is containers:
+        return hit[1]
     out: dict[str, list] = {}
-    for c in containers:
-        rank = split_rank(c.path.name)
+    for c in sorted(containers, key=lambda k: split_rank(k.path.name)):
+        get = out.get
         for p, ud in c.entries:
-            if substr and substr not in p:
-                continue
             if exts and not p.endswith(exts):
                 continue
-            out.setdefault(p, []).append((c, ud))
-    for lst in out.values():
-        lst.sort(key=lambda h: split_rank(h[0].path.name))
+            if substr and substr not in p:
+                continue
+            lst = get(p)
+            if lst is None:
+                out[p] = [(c, ud)]
+            else:
+                lst.append((c, ud))
+    _INDEX_CACHE[key] = (containers, out)              # keeps id() of the list stable
     return out

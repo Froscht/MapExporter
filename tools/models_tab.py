@@ -104,7 +104,7 @@ def vertex_colors(m, fallback):
     """Per-vertex RGBA from the base-color textures (sampled at the UVs) and flat slot colors."""
     C = np.empty((len(m.pos), 4), np.float32)
     C[:] = (*fallback, 1.0)
-    uv = np.asarray(m.uv, np.float32) if m.uv else None
+    uv = np.asarray(m.uv, np.float32) if m.uv is not None else None
     for mat, _first, _ntri, v0, v1 in m.sections:
         if mat in m.textures and uv is not None:
             img = np.asarray(m.textures[mat].convert("RGB"), np.float32) / 255.0
@@ -343,7 +343,7 @@ class ModelsTab(QWidget):
         self.gl_items, self.gl_parts = [], []
         lo = np.array([1e30] * 3); hi = -lo
         for i, m in enumerate(meshes):
-            if not m.pos or not m.idx:
+            if len(m.pos) == 0 or len(m.idx) == 0:
                 continue
             V = np.asarray(m.pos, dtype=np.float32)
             V[:, 1] *= -1                       # Unreal is left-handed: mirror Y for display

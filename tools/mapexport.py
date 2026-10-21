@@ -6,6 +6,11 @@
     python tools/mapexport.py glb        <Map> [placements.jsonl] [--out=...glb] [--crop] [--ohne-blaetter]
                                          [--ohne-effekte] [--ohne-hilfsgeo] [--ohne-decals]
                                          [--spielbereich] [--volumes] [--ohne-terrain]
+    python tools/mapexport.py karte      <Map> [--ohne-crop] [--ohne-platzierungen]
+                                         [--cell=100] [--seed=x,y] [--strikt] [--hang=44.765|aus]
+                                         [--ohne-blaetter] [--ohne-effekte] [--ohne-hilfsgeo]
+                                         [--ohne-decals] [--spielbereich] [--volumes] [--ohne-terrain]
+                                         [--out=...glb]
     python tools/mapexport.py all        [Map ...] [--ratio=0.25] [--ohne-vereinfachen] [--ohne-crop]
                                          [--mit-blaettern] [--mit-effekten] [--mit-hilfsgeo]
                                          [--mit-decals] [--ab=<Map>] [--neu]
@@ -14,7 +19,10 @@
 
 Steps: placements (all static-mesh placements of a map -> out/map/<Map>_placements.jsonl),
 playarea (walkable area -> out/map/<Map>_playarea.json; exit code 3 = the map has none),
-glb (GLB of the map -> out/map/<Map>.glb). `all` runs every map in turn, simplifies the result
+glb (GLB of the map -> out/map/<Map>.glb). `karte` runs the three steps in ONE process: mounting the
+containers, the usmap schema and the name tables cost about a second per process, and three separate
+steps pay that three times; it crops by default (no play area -> GLB without cropping, like `all`).
+`all` runs every map in turn, simplifies the result
 with Blender and writes one log per map to out/map/logs/. textures/audio are the browsable
 catalogues: PNG -> out/textures/, WAV + UEBA (.binka) -> out/audio/.
 """

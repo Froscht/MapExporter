@@ -203,51 +203,61 @@ def positions(d, b):
     off, size, n = b["pos"]
     if size != 12:
         raise ValueError(f"Positionsstride {size} (nur 12 = float3 gemessen)")
-    return [struct.unpack_from("<3f", d, off + 12 * i) for i in range(n)]
+    import numpy as np
+    # float64 result: reading float32 raw data exactly, but later Python/numpy arithmetic
+    # then runs in double precision like the former struct.unpack list of tuples did
+    return np.frombuffer(d, dtype="<f4", count=3 * n, offset=off).reshape(n, 3).astype(np.float64)
 
 
 def indices(d, ib):
     is32, (off, size, n) = ib
+    import numpy as np
     raw = d[off:off + size * n]
     if is32:
-        return list(struct.unpack(f"<{len(raw) // 4}I", raw))
-    return list(struct.unpack(f"<{len(raw) // 2}H", raw))
+        return np.frombuffer(raw, dtype="<u4", count=len(raw) // 4)
+    return np.frombuffer(raw, dtype="<u2", count=len(raw) // 2)
 
 
 def normals(d, b):
     """TangentZ per vertex (FPackedNormal: Data ^ 0x80808080, byte / 127.5 - 1)."""
     if b["tan"] is None:
         return None
+    import numpy as np
     off, size, n = b["tan"]
     if b["high_tan"] and size == 16:
         # High-precision tangents: FPackedRGBA16N pair per vertex, TangentX 4×u16 then
         # TangentZ 4×u16; each u16 ^ 0x8000, value = v / 32767.5 - 1
-        out = []
-        for i in range(n):
-            x, y, z, _w = struct.unpack_from("<4H", d, off + 16 * i + 8)
-            out.append(((x ^ 0x8000) / 32767.5 - 1, (y ^ 0x8000) / 32767.5 - 1, (z ^ 0x8000) / 32767.5 - 1))
-        return out
+        u = np.frombuffer(d, dtype="<u2", count=8 * n, offset=off).reshape(n, 8)[:, 4:7]
+        return (u.astype(np.int64) ^ 0x8000) / 32767.5 - 1
     if b["high_tan"] or size != 8:
         raise ValueError(f"Tangenten high_tan={b['high_tan']} size={size} (nicht gemessen)")
-    out = []
-    for i in range(n):
-        z = struct.unpack_from("<I", d, off + 8 * i + 4)[0] ^ 0x80808080
-        out.append(((z & 0xFF) / 127.5 - 1, ((z >> 8) & 0xFF) / 127.5 - 1,
-                    ((z >> 16) & 0xFF) / 127.5 - 1))
+    z = np.frombuffer(d, dtype="<u4", count=2 * n, offset=off)[1::2] ^ 0x80808080
+    out = np.empty((n, 3), dtype=np.float64)
+    out[:, 0] = (z & 0xFF) / 127.5 - 1
+    out[:, 1] = ((z >> 8) & 0xFF) / 127.5 - 1
+    out[:, 2] = ((z >> 16) & 0xFF) / 127.5 - 1
     return out
 
 
 def uvs(d, b, channel=0):
     if b["uv"] is None:
         return None
+    import numpy as np
     off, size, count = b["uv"]
     ntc = b["num_uv"]
+    n = b["num_verts"]
     if b["full_uv"]:
-        return [struct.unpack_from("<2f", d, off + (i * ntc + channel) * 8)
-                for i in range(b["num_verts"])]
+        if n * ntc * 8 <= len(d) - off:
+            a = np.frombuffer(d, dtype="<f4", count=2 * ntc * n, offset=off).reshape(n, ntc, 2)
+            return np.ascontiguousarray(a[:, channel, :], dtype=np.float64)
+        # short buffer: fall back to the per-row reader (raises exactly like before)
+        return [struct.unpack_from("<2f", d, off + (i * ntc + channel) * 8) for i in range(n)]
+    if n * ntc * 4 <= len(d) - off:
+        u = np.frombuffer(d, dtype="<u2", count=2 * ntc * n, offset=off).reshape(n, ntc, 2)[:, channel, :]
+        # view, not astype: the u16 bits are the half-float, like struct "<e"
+        return u.copy().view(np.float16).astype(np.float64)
     return [(_half(u), _half(v)) for u, v in
-            (struct.unpack_from("<2H", d, off + (i * ntc + channel) * 4)
-             for i in range(b["num_verts"]))]
+            (struct.unpack_from("<2H", d, off + (i * ntc + channel) * 4) for i in range(n))]
 
 
 # ---------- skeletal mesh render data ----------
@@ -419,12 +429,16 @@ def params(fields):
     return out
 
 
-def _add(a, b, s=1.0):
-    return (a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s)
+def _pos_coeffs(t):
+    """Hermite weights of the position at t (t: float or numpy array)."""
+    t2, t3 = t * t, t * t * t
+    return 2 * t3 - 3 * t2 + 1, t3 - 2 * t2 + t, t3 - t2, -2 * t3 + 3 * t2
 
 
-def _cross(a, b):
-    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+def _dir_coeffs(t):
+    """Hermite weights of the tangent direction at t (t: float or numpy array)."""
+    t2 = t * t
+    return 6 * t2 - 6 * t, 3 * t2 - 4 * t + 1, 3 * t2 - 2 * t, -6 * t2 + 6 * t
 
 
 def _norm(a):
@@ -432,62 +446,91 @@ def _norm(a):
     return (a[0] / L, a[1] / L, a[2] / L) if L > 1e-12 else (0.0, 0.0, 0.0)
 
 
+def _norm_rows(A):
+    """_norm for an (m, 3) array — same operations, same evaluation order."""
+    import numpy as np
+    L2 = A[:, 0] * A[:, 0] + A[:, 1] * A[:, 1] + A[:, 2] * A[:, 2]
+    L = np.sqrt(L2)
+    ok = L > 1e-12
+    return np.where(ok[:, None], A / np.where(ok, L, 1.0)[:, None], 0.0)
+
+
 def eval_pos(p, t):
-    t2, t3 = t * t, t * t * t
-    a, b, c, d = 2 * t3 - 3 * t2 + 1, t3 - 2 * t2 + t, t3 - t2, -2 * t3 + 3 * t2
+    a, b, c, d = _pos_coeffs(t)
     S, ST, ET, E = p["StartPos"], p["StartTangent"], p["EndTangent"], p["EndPos"]
     return tuple(a * S[i] + b * ST[i] + c * ET[i] + d * E[i] for i in range(3))
 
 
 def eval_dir(p, t):
-    t2 = t * t
-    a, b, c, d = 6 * t2 - 6 * t, 3 * t2 - 4 * t + 1, 3 * t2 - 2 * t, -6 * t2 + 6 * t
+    a, b, c, d = _dir_coeffs(t)
     S, ST, ET, E = p["StartPos"], p["StartTangent"], p["EndTangent"], p["EndPos"]
     return _norm(tuple(a * S[i] + b * ST[i] + c * ET[i] + d * E[i] for i in range(3)))
 
 
+def _frames(p, t):
+    """Vectorized CalcSliceTransform for the parameter list t: arrays
+    (pos incl. offset, Dir, XVec, YVec, scale_x, scale_y) with one row per t."""
+    import numpy as np
+    t = np.asarray(t, dtype=np.float64)
+    S, ST, ET, E = (np.asarray(p[k], dtype=np.float64)
+                    for k in ("StartPos", "StartTangent", "EndTangent", "EndPos"))
+    a, b, c, d = (w[:, None] for w in _pos_coeffs(t))
+    pos = a * S + b * ST + c * ET + d * E
+    a, b, c, d = (w[:, None] for w in _dir_coeffs(t))
+    dirs = _norm_rows(a * S + b * ST + c * ET + d * E)
+    up = np.asarray(p["SplineUpDir"], dtype=np.float64)
+    bx = _norm_rows(np.stack([up[1] * dirs[:, 2] - up[2] * dirs[:, 1],
+                              up[2] * dirs[:, 0] - up[0] * dirs[:, 2],
+                              up[0] * dirs[:, 1] - up[1] * dirs[:, 0]], axis=1))
+    by = _norm_rows(np.stack([dirs[:, 1] * bx[:, 2] - dirs[:, 2] * bx[:, 1],
+                              dirs[:, 2] * bx[:, 0] - dirs[:, 0] * bx[:, 2],
+                              dirs[:, 0] * bx[:, 1] - dirs[:, 1] * bx[:, 0]], axis=1))
+    h = t * t * (3 - 2 * t) if p["bSmoothInterpRollScale"] else t
+    so, eo = np.asarray(p["StartOffset"], np.float64), np.asarray(p["EndOffset"], np.float64)
+    pos = pos + bx * (so[0] + (eo[0] - so[0]) * h)[:, None]
+    pos = pos + by * (so[1] + (eo[1] - so[1]) * h)[:, None]
+    ss, es = np.asarray(p["StartScale"], np.float64), np.asarray(p["EndScale"], np.float64)
+    sc0 = ss[0] + (es[0] - ss[0]) * h
+    sc1 = ss[1] + (es[1] - ss[1]) * h
+    roll = p["StartRoll"] + (p["EndRoll"] - p["StartRoll"]) * h
+    # math.cos/sin per value (np.cos/np.sin could differ by an ULP → different GLB bytes)
+    cs = np.array([math.cos(r) for r in roll], dtype=np.float64)
+    sn = np.array([math.sin(r) for r in roll], dtype=np.float64)
+    xv = cs[:, None] * bx - sn[:, None] * by
+    yv = cs[:, None] * by + sn[:, None] * bx
+    return pos, dirs, xv, yv, sc0, sc1
+
+
 def slice_frame(p, t):
     """(pos incl. offset, Dir, XVec, YVec, scale) at parameter t, as UE CalcSliceTransform."""
-    h = t * t * (3 - 2 * t) if p["bSmoothInterpRollScale"] else t
-    pos, d = eval_pos(p, t), eval_dir(p, t)
-    bx = _norm(_cross(p["SplineUpDir"], d))
-    by = _norm(_cross(d, bx))
-    lerp = lambda a, b: a + (b - a) * h
-    off = (lerp(p["StartOffset"][0], p["EndOffset"][0]), lerp(p["StartOffset"][1], p["EndOffset"][1]))
-    pos = _add(_add(pos, bx, off[0]), by, off[1])
-    sc = (lerp(p["StartScale"][0], p["EndScale"][0]), lerp(p["StartScale"][1], p["EndScale"][1]))
-    roll = lerp(p["StartRoll"], p["EndRoll"])
-    cs, sn = math.cos(roll), math.sin(roll)
-    xv = tuple(cs * bx[i] - sn * by[i] for i in range(3))
-    yv = tuple(cs * by[i] + sn * bx[i] for i in range(3))
-    return pos, d, xv, yv, sc
+    o, d, xv, yv, s0, s1 = _frames(p, (float(t),))
+    return tuple(o[0]), tuple(d[0]), tuple(xv[0]), tuple(yv[0]), (float(s0[0]), float(s1[0]))
 
 
 def deform(pos, nrm, p, mesh_min, mesh_max):
     """Bend positions/normals in component space. mesh_min/max: mesh bounds (3-tuples);
     like UE, the StaticMesh bounds along the forward axis are used unless
     SplineBoundaryMin/Max are set."""
+    import numpy as np
     f, ax, ay = AXES[p["ForwardAxis"]]
     lo, hi = mesh_min[f], mesh_max[f]
     if p["SplineBoundaryMin"] < p["SplineBoundaryMax"]:
         lo, hi = p["SplineBoundaryMin"], p["SplineBoundaryMax"]
     L = hi - lo if hi > lo else 1.0
-    cache = {}
-    out_p, out_n = [], []
-    for i, v in enumerate(pos):
-        t = (v[f] - lo) / L
-        fr = cache.get(t)
-        if fr is None:
-            fr = cache[t] = slice_frame(p, t)
-        o, d, xv, yv, sc = fr
-        out_p.append(_add(_add(o, xv, v[ax] * sc[0]), yv, v[ay] * sc[1]))
-        if nrm is not None:
-            n = nrm[i]
-            sx = sc[0] if abs(sc[0]) > 1e-9 else 1.0
-            sy = sc[1] if abs(sc[1]) > 1e-9 else 1.0
-            out_n.append(_norm(_add(_add(tuple(n[f] * d[k] for k in range(3)), xv, n[ax] / sx),
-                                    yv, n[ay] / sy)))
-    return out_p, (out_n if nrm is not None else None)
+    P = np.asarray(pos, dtype=np.float64)
+    if P.size == 0:
+        e = np.empty((0, 3), dtype=np.float64)
+        return e, (e.copy() if nrm is not None else None)
+    o, d, xv, yv, sc0, sc1 = _frames(p, (P[:, f] - lo) / L)
+    out_p = (o + xv * (P[:, ax] * sc0)[:, None]) + yv * (P[:, ay] * sc1)[:, None]
+    if nrm is None:
+        return out_p, None
+    N = np.asarray(nrm, dtype=np.float64)
+    ok0, ok1 = np.abs(sc0) > 1e-9, np.abs(sc1) > 1e-9
+    m = d * N[:, f][:, None]
+    m = m + xv * (N[:, ax] / np.where(ok0, sc0, 1.0))[:, None]
+    m = m + yv * (N[:, ay] / np.where(ok1, sc1, 1.0))[:, None]
+    return out_p, _norm_rows(m)
 
 
 def _selftest():

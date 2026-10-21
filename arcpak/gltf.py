@@ -114,38 +114,43 @@ class GlbBuilder:
     def add_mesh(self, name, pos, idx, sections, nrm=None, uv=None, mat_names=None, joints=None, weights=None):
         """pos/nrm in UE coordinates (cm), idx = LOD index list, sections = (mat, first, ntri, vmin, vmax).
         joints/weights: optional 4 skin influences per vertex (indices into the skin's joint list)."""
+        import numpy as np
+        P = np.asarray(pos, dtype=np.float64)
+        NRM = None if nrm is None else np.asarray(nrm, dtype=np.float64)
+        UVs = None if uv is None else np.asarray(uv, dtype=np.float64)
+        IX = np.asarray(idx, dtype=np.int64)
         prims = []
         for mat, first, ntri, vmin, vmax in sections:
             if ntri == 0:
                 continue
             sel = range(vmin, vmax + 1)
-            pdata = struct.pack(f"<{3 * len(sel)}f", *(c for i in sel for c in
-                                                       (pos[i][0] * 0.01, pos[i][2] * 0.01, pos[i][1] * 0.01)))
+            nv = len(sel)
+            sl = slice(vmin, vmax + 1)
+            # (x, z, y) · 0.01 in float64, then the float32 the accessor stores
+            Q = (P[sl][:, [0, 2, 1]] * 0.01).astype("<f4")
+            pdata = Q.tobytes()
             # min/max from the float32 values: glTF requires an exact match with the data
-            P = list(struct.iter_unpack("<3f", pdata))
-            attrs = {"POSITION": self._acc(pdata, 5126, len(P), "VEC3", 34962,
-                [min(p[k] for p in P) for k in range(3)], [max(p[k] for p in P) for k in range(3)])}
-            if nrm:
-                N = []
-                for i in sel:
-                    x, y, z = nrm[i][0], nrm[i][2], nrm[i][1]
-                    L = (x * x + y * y + z * z) ** 0.5
-                    N.append((x / L, y / L, z / L) if L > 1e-6 else (0.0, 0.0, 1.0))
-                attrs["NORMAL"] = self._acc(struct.pack(f"<{3 * len(N)}f", *(c for n in N for c in n)),
-                                            5126, len(N), "VEC3", 34962)
+            mn, mx = Q.min(0), Q.max(0)
+            attrs = {"POSITION": self._acc(pdata, 5126, nv, "VEC3", 34962,
+                [float(mn[k]) for k in range(3)], [float(mx[k]) for k in range(3)])}
+            if NRM is not None:
+                R = NRM[sl][:, [0, 2, 1]]
+                L = np.sqrt(R[:, 0] * R[:, 0] + R[:, 1] * R[:, 1] + R[:, 2] * R[:, 2])
+                ok = L > 1e-6
+                N = np.where(ok[:, None], R / np.where(ok, L, 1.0)[:, None], (0.0, 0.0, 1.0))
+                attrs["NORMAL"] = self._acc(N.astype("<f4").tobytes(), 5126, nv, "VEC3", 34962)
             if joints is not None and weights is not None:
-                attrs["JOINTS_0"] = self._acc(struct.pack(f"<{4 * len(sel)}H", *(j for i in sel for j in joints[i])),
-                                              5123, len(sel), "VEC4", 34962)
-                attrs["WEIGHTS_0"] = self._acc(struct.pack(f"<{4 * len(sel)}f", *(x for i in sel for x in weights[i])),
-                                               5126, len(sel), "VEC4", 34962)
-            if uv:
-                attrs["TEXCOORD_0"] = self._acc(
-                    struct.pack(f"<{2 * len(sel)}f", *(c for i in sel for c in uv[i])), 5126, len(sel), "VEC2", 34962)
-            I = [i - vmin for i in idx[first:first + 3 * ntri]]
-            if max(I) < 65536:
-                idata, ct = _pad4(struct.pack(f"<{len(I)}H", *I)), 5123
+                attrs["JOINTS_0"] = self._acc(struct.pack(f"<{4 * nv}H", *(j for i in sel for j in joints[i])),
+                                              5123, nv, "VEC4", 34962)
+                attrs["WEIGHTS_0"] = self._acc(struct.pack(f"<{4 * nv}f", *(x for i in sel for x in weights[i])),
+                                               5126, nv, "VEC4", 34962)
+            if UVs is not None:
+                attrs["TEXCOORD_0"] = self._acc(UVs[sl].astype("<f4").tobytes(), 5126, nv, "VEC2", 34962)
+            I = IX[first:first + 3 * ntri] - vmin
+            if int(I.max()) < 65536:
+                idata, ct = _pad4(I.astype("<u2").tobytes()), 5123
             else:
-                idata, ct = struct.pack(f"<{len(I)}I", *I), 5125
+                idata, ct = I.astype("<u4").tobytes(), 5125
             ia = self._acc(idata, ct, len(I), "SCALAR", 34963)
             prim = {"attributes": attrs, "indices": ia, "mode": 4}
             mname = mat_names[mat] if mat_names and 0 <= mat < len(mat_names) else f"mat{mat}"
