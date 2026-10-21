@@ -310,8 +310,11 @@ class IoStoreContainer:
             self._ucas = self.ucas_path.open("rb")
         return self._ucas
 
-    def get_chunk(self, entry_index: int) -> bytes:
+    def get_chunk(self, entry_index: int, nbytes: int = 0) -> bytes:
+        """Chunk bytes; nbytes > 0 stops after that many bytes (only the blocks it needs)."""
         off, ln = self.chunk_offsets[entry_index]
+        if nbytes:
+            ln = min(ln, nbytes)
         cb = self.cbsize
         first, last = off // cb, (off + ln - 1) // cb
         f = self._data()

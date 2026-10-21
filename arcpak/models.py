@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 
 from . import game, gltf, iostore, mesh, zen
@@ -30,6 +31,7 @@ CATEGORIES = ("weapons", "bots", "gear", "characters")
 _index = None
 _lower = None                           # lower-case path -> path (asset references ignore case)
 _pkg_cache = {}
+_index_lock = threading.Lock()          # two GUI tabs may ask for the index at the same time
 
 
 @dataclass
@@ -68,8 +70,10 @@ class Item:
 def index():
     global _index, _lower
     if _index is None:
-        _index = iostore.path_index(game.C, exts=(".uasset", ".ubulk"))
-        _lower = {k.lower(): k for k in _index}
+        with _index_lock:
+            if _index is None:
+                _index = iostore.path_index(game.C, exts=(".uasset", ".ubulk"))
+                _lower = {k.lower(): k for k in _index}
     return _index
 
 
@@ -305,6 +309,9 @@ def catalogue() -> dict[str, list[Item]]:
             cat["bots"].append(Item("bots", _pretty(stem), g, k.split("/Enemies/")[1].split("/")[0]))
         elif "/Characters/Backpacks/" in k or "/Characters/RaiderTool/" in k:
             cat["gear"].append(Item("gear", _pretty(stem), g))
+        elif "/Pioneer/Items/Armor/" in k:
+            # deployable armor bodies (skeletal, with Deploy/Damaged clips)
+            cat["gear"].append(Item("gear", _pretty(stem).replace("01 Default ", ""), g))
     for k in keys:
         if "/Items/Firearms/" in k:
             folder = k.split("/Firearms/")[1].split("/")[0]
@@ -613,11 +620,19 @@ def load_clips(item: Item, meshes: list[MeshData]):
     if not skel:
         return clips, warnings
     names = anim.skeleton_bones(skel[1])
+    pose = None
     for g in gpaths:
         try:
-            clips.append(anim.load_clip(g, names))
+            clip = anim.load_clip(g, names)
         except Exception as e:
             warnings.append(f"{g.rsplit('/', 1)[-1]}: {e}")
+            continue
+        if clip.additive:               # local-space deltas -> baked onto the bind pose
+            if pose is None:
+                merged = merged_skeleton(meshes)
+                pose = dict(zip(merged[0], merged[2])) if merged else {}
+            clip = anim.bake_additive(clip, pose)
+        clips.append(clip)
     return clips, warnings
 
 

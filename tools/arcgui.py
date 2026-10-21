@@ -6,6 +6,10 @@ Tabs:
   Maps      - pick a map -> export options -> export: chain P2 (placements) ->
               P2b (play area, if needed) -> P3 (GLB) -> simplify (Blender) ->
               open in Blender; each step runs as a subprocess, output shown live in the log
+  Modelle   - browse weapons/bots/gear/outfits, 3D preview, export GLB
+  Audio     - browse the cooked sounds (duration, rate, channels), export WAV (raw PCM) or
+              re-embed the BinkA blocks into a UEBA container
+  Texturen  - browse the cooked Texture2D assets, preview them, export PNG
   Inventory - what already exists: extracted/, out/ with file/byte counts
 
 Keys/paths live in arcpak/settings.json -> edit via Settings dialog when
@@ -21,8 +25,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont
+from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont, QPixmap
 from PyQt6.QtWidgets import (QSizePolicy, QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
                              QFormLayout, QGroupBox, QHBoxLayout,
                              QHeaderView, QLineEdit, QListWidget, QMainWindow, QMessageBox,
@@ -35,7 +39,9 @@ from arcpak.config import detached_kwargs, find_blender, open_folder, parse_prog
 from arcpak.iostore import mount_directory
 from arcpak.mapnames import map_names
 from i18n import LANGUAGES, set_language, tr
+from audio_tab import AudioTab, PlayWorker
 from models_tab import ModelsTab
+from textures_tab import ImageWorker, TexturesTab
 
 def dauer_text(sek: float) -> str:
     """42 s · 3:07 · 1:02:33"""
@@ -145,6 +151,331 @@ class ChainWorker(QThread):
             self.proc.terminate()
 
 
+# ---------- file info (browser double-click) ---------------------------------------------------
+def game_gpath(path: str):
+    """/Game path of a FULL container entry path, or None (engine mounts are not addressable).
+
+    Every game mount starts with "../../.." and the index keys carry the whole path — a bare
+    container-relative path is not enough, the caller must prepend the container's mount."""
+    from arcpak import models
+    content = models.CONTENT                                   # "../../../PioneerGame/Content/"
+    if path[:len(content)].lower() != content.lower():
+        return None
+    gpath = models.to_gpath(content + path[len(content):])
+    return gpath if models.exists(gpath) else None
+
+
+class InfoWorker(QThread):
+    """Classify one browser file and collect its package details (schema reads off the UI thread).
+
+    .ubulk/.uexp/.upkg are judged through their .uasset counterpart; kind:
+    'map' | 'textur' | 'mesh' | 'klang' | 'uasset' | 'fremd' | 'fehler'."""
+    done = pyqtSignal(str, object, str)                # kind, data dict, error
+
+    def __init__(self, parent, rel):
+        super().__init__(parent)
+        self.rel = rel
+
+    def run(self):
+        from arcpak import game, models
+        try:
+            ext = os.path.splitext(self.rel)[1].lower()
+            base, data = self.rel, {}
+            if ext in (".ubulk", ".uexp", ".upkg"):
+                base = self.rel[:-len(ext)] + ".uasset"
+                data["companion"] = ext
+            if os.path.splitext(base)[1].lower() == ".umap":
+                m = re.search(r"Maps/([^/]+)/", self.rel)
+                data["map"] = m.group(1) if m else os.path.splitext(self.rel.rpartition("/")[2])[0]
+                self.done.emit("map", data, "")
+                return
+            gpath = game_gpath(base)
+            if gpath is None:
+                self.done.emit("fremd", data, "")
+                return
+            data["gpath"] = gpath
+            stem = os.path.splitext(base.rpartition("/")[2])[0]
+            _raw, pkg = models.package(gpath)
+            exports = [(pkg.export_class(e, script_names=game.smap) or "?", e.size) for e in pkg.exports]
+            data["exports"] = exports
+            classes = {c for c, _ in exports}
+            key = models.to_key(gpath)
+            if "Texture2D" in classes:
+                from arcpak import texture
+                data["item"] = texture.Item(name=stem, gpath=gpath, folder=texture._folder(key))
+                self.done.emit("textur", data, "")
+            elif classes & {"StaticMesh", "SkeletalMesh"}:
+                data["mesh_class"] = "SkeletalMesh" if "SkeletalMesh" in classes else "StaticMesh"
+                self.done.emit("mesh", data, "")
+            elif any(c and "Sound" in c for c in classes) or "/Audio/" in gpath:
+                from arcpak import audio
+                meta = audio._sound_wave(gpath)
+                hits = models.lookup(models.to_key(gpath, ".ubulk"))
+                ubytes = int(hits[0][0].chunk_offsets[hits[0][1]][1]) if hits else 0
+                it = audio.Item(name=stem, gpath=gpath, folder="",
+                                duration=(meta[0] if meta else None), rate=(meta[1] if meta else None),
+                                channels=(meta[2] if meta else None), size=ubytes,
+                                ubulk=bool(hits), pcm=bool(hits) and audio._pcm_shape(gpath, ubytes, meta) is not None)
+                data["item"] = it
+                self.done.emit("klang", data, "")
+            else:
+                self.done.emit("uasset", data, "")
+        except Exception as e:
+            self.done.emit("fehler", {}, f"{type(e).__name__}: {e}")
+
+
+class GlbWorker(QThread):
+    """Decode one browser mesh directly to a GLB (out/models/Browser/), textures included."""
+    done = pyqtSignal(str, object, str)                # path, warnings, error
+
+    def __init__(self, parent, item):
+        super().__init__(parent)
+        self.item = item
+
+    def run(self):
+        from arcpak import models
+        try:
+            meshes, warnings = models.build(self.item)
+            if not meshes:
+                raise ValueError("keine Meshes im Paket")
+            warnings += models.apply_textures(meshes)
+            path = models.out_path(self.item)
+            models.export_glb(meshes, path)
+        except Exception as e:
+            self.done.emit("", [], f"{type(e).__name__}: {e}")
+            return
+        self.done.emit(path, warnings, "")
+
+
+class FileInfoDialog(QDialog):
+    """Everything one browser file offers (double-click): texture preview + PNG, sound play/export,
+    mesh as GLB, map → Karten tab, generic package → export class list."""
+
+    def __init__(self, win, ci, ud, rel):
+        super().__init__(win)
+        self.win, self.ci, self.ud, self.rel = win, ci, ud, rel
+        self.kind, self.data = "", {}
+        self.info_worker = self.image_worker = self.play_worker = self.glb_worker = None
+        c = win.containers[ci]
+        fname = rel.rpartition("/")[2]
+        self.setWindowTitle(tr("Dateiinfo — {name}", name=fname))
+        self.resize(760, 600)
+        lay = QVBoxLayout(self)
+
+        head = QLabel(f"<b>{fname}</b> — {tr('{mb} MB komprimiert, Container {container}',
+                                             mb=f'{c.chunk_offsets[ud][1] / 1e6:.2f}', container=c.base)}")
+        head.setWordWrap(True)
+        head.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        path_line = QLabel(f"<code>{rel}</code>")
+        path_line.setWordWrap(True)
+        path_line.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.info = QLabel(tr("Untersuche die Datei …"))
+        self.info.setWordWrap(True)
+        self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(head)
+        lay.addWidget(path_line)
+        lay.addWidget(self.info)
+
+        self.preview = QLabel("—")
+        self.preview.setMinimumSize(320, 260)
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setVisible(False)
+        lay.addWidget(self.preview, 1)
+
+        btns = QHBoxLayout()
+        self.btn_play = QPushButton(tr("▶ Anhören"))
+        self.btn_play.clicked.connect(self.play)
+        self.btn_wav = QPushButton(tr("Als WAV"))
+        self.btn_wav.clicked.connect(lambda: self._sound_export("wav"))
+        self.btn_binka = QPushButton(tr("Als UEBA (.binka)"))
+        self.btn_binka.clicked.connect(lambda: self._sound_export("binka"))
+        self.btn_png = QPushButton(tr("Als PNG exportieren"))
+        self.btn_png.clicked.connect(self._export_png)
+        self.btn_glb = QPushButton(tr("Als GLB exportieren"))
+        self.btn_glb.clicked.connect(self._export_glb)
+        self.btn_maps = QPushButton(tr("Zum Karten-Tab"))
+        self.btn_maps.clicked.connect(self._goto_maps_tab)
+        self.btn_raw = QPushButton(tr("Rohe Datei extrahieren"))
+        self.btn_raw.setToolTip(tr("Die Containerdatei unverändert in den Ausgabearchiv-Ordner schreiben"))
+        self.btn_raw.clicked.connect(lambda: self.win._run_extract([(self.ci, self.ud, self.rel)]))
+        for b in (self.btn_play, self.btn_wav, self.btn_binka, self.btn_png, self.btn_glb, self.btn_maps):
+            b.setVisible(False)
+            btns.addWidget(b)
+        btns.addWidget(self.btn_raw)
+        btns.addStretch(1)
+        closer = QPushButton(tr("Schließen"))
+        closer.clicked.connect(self.accept)
+        btns.addWidget(closer)
+        lay.addLayout(btns)
+        self.step = QLabel("")
+        self.step.setWordWrap(True)
+        self.step.setStyleSheet("color: #9aa0a6;")
+        lay.addWidget(self.step)
+
+        # classification works on the full entry path (mount + relative), not on the display rel
+        self.info_worker = InfoWorker(self, f"{c.mount_point.rstrip('/')}/{rel}")
+        self.info_worker.done.connect(self._kind_done)
+        self.info_worker.start()
+
+    # ---------- classification ----------
+    def _kind_done(self, kind, data, err):
+        self.kind, self.data = kind, data or {}
+        if err:
+            self.info.setText(f"<span style='color:#e88'>{err}</span>")
+            return
+        lines = []
+        if self.data.get("companion"):
+            lines.append(tr("Diese {ext} gehört zum gleichnamigen .uasset — die Infos unten beziehen sich darauf.",
+                            ext=self.data["companion"]))
+        gpath = self.data.get("gpath") or ""
+        if kind == "map":
+            name = self.data.get("map") or ""
+            disp = self.win.map_names.get(name)
+            lines.append(f"<b>{tr('Karte')}</b> {name}" + (f" — {disp}" if disp else ""))
+            lines.append(tr("Karten exportierst du im Tab Karten (Platzierungen, Spielbereich, GLB)."))
+            self.btn_maps.setVisible(True)
+        elif kind == "textur":
+            it = self.data["item"]
+            lines.append(f"<b>{tr('Textur')}</b> <code>{gpath}</code>")
+            self.preview.setVisible(True)
+            self.step.setText(tr("Vorschau wird geladen …"))
+            self.image_worker = ImageWorker(self, it, 1024, False)
+            self.image_worker.done.connect(self._preview_done)
+            self.image_worker.start()
+            self.btn_png.setVisible(True)
+        elif kind == "klang":
+            it = self.data["item"]
+            dauer = dauer_text(it.duration) if it.duration else tr("unbekannt")
+            fmt = (tr("Roh-PCM (16-bit) → WAV") if it.pcm
+                   else (tr("BinkA → UEBA-Container; ▶ dekodiert über FFmpeg") if it.ubulk
+                         else tr("nur Meta-Daten")))
+            lines.append(f"<b>{tr('Klang')}</b> <code>{gpath}</code><br>"
+                         f"{dauer} · {it.rate or '?'} Hz · {it.channels or '?'} Kanäle · {fmt}")
+            if it.ubulk:
+                self.btn_play.setVisible(True)
+                (self.btn_wav if it.pcm else self.btn_binka).setVisible(True)
+        elif kind == "mesh":
+            lines.append(f"<b>{self.data.get('mesh_class')}</b> <code>{gpath}</code>")
+            lines.append(tr("Models mit Vorschau gibt es im Tab Modelle — hier geht der Weg direkt zum GLB."))
+            self.btn_glb.setVisible(True)
+        elif kind == "uasset":
+            exports = self.data.get("exports") or []
+            cls = ", ".join(f"{c} ({sz:,} B)" for c, sz in exports[:12]) + (" …" if len(exports) > 12 else "")
+            lines.append(f"<b>{tr('Paket')}</b> <code>{gpath}</code>")
+            lines.append(tr("Export-Klassen: {cls}", cls=cls or "—"))
+        elif kind == "fremd":
+            lines.append(tr("Engine-Anteil oder fremder Mount — nicht über /Game adressierbar, "
+                            "deshalb nur Container-Info."))
+        self.info.setText("<br>".join(lines) or "—")
+
+    # ---------- texture preview / PNG ----------
+    def _preview_done(self, item, png, info, err):
+        if item is not self.data.get("item"):
+            return
+        if err or png is None:
+            self.preview.setText("—")
+            self.step.setText(tr("Keine Vorschau: {err}", err=err))
+            return
+        pm = QPixmap()
+        pm.loadFromData(png)
+        self.preview.setPixmap(pm.scaled(640, 480, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation))
+        raum = (info or {}).get("farbraum")
+        self.step.setText(f"{pm.width()}×{pm.height()}" + (f" · {tr('Farbraum')}: {raum}" if raum else ""))
+
+    def _export_png(self):
+        it = self.data.get("item")
+        if it is None:
+            return
+        from arcpak import texture
+        try:
+            path = texture.export_png(it.gpath, texture.out_path(it, base=str(HERE / "out" / "textures")))
+        except Exception as e:
+            self.step.setText(tr("PNG-Export fehlgeschlagen: {err}", err=f"{type(e).__name__}: {e}"))
+            return
+        self.step.setText(tr("PNG geschrieben → {path}", path=os.path.relpath(path, HERE)))
+
+    # ---------- sound ----------
+    def play(self):
+        it = self.data.get("item")
+        if it is None or not it.ubulk or (self.play_worker and self.play_worker.isRunning()):
+            return
+        self.btn_play.setEnabled(False)
+        self.step.setText(tr("Klang wird vorbereitet …"))
+        self.play_worker = PlayWorker(self, it)
+        self.play_worker.done.connect(self._play_done)
+        self.play_worker.start()
+
+    def _play_done(self, path, err):
+        way = self.play_worker.way if self.play_worker else ""
+        self.btn_play.setEnabled(self.data.get("item") is not None)
+        if err:
+            self.step.setText(tr("Abspielen nicht möglich: {err}", err=err))
+            return
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        hint = tr("BinkA über FFmpeg dekodiert") if way == "ffmpeg" else tr("Roh-PCM")
+        self.step.setText(tr("WAV → {path} ({hint}) — {action}", path=os.path.basename(path), hint=hint,
+                             action=tr("der System-Player öffnet ihn") if opened
+                             else tr("den Player konnte man nicht automatisch öffnen — Datei manuell öffnen")))
+
+    def _sound_export(self, kind):
+        it = self.data.get("item")
+        if it is None:
+            return
+        from arcpak import audio
+        out = str(HERE / "out" / "audio")
+        try:
+            if kind == "wav":
+                path = audio.export_wav(it, audio.out_path(it, ".wav", out))
+            else:
+                path = audio.export_binka(it, audio.out_path(it, ".binka", out))
+        except Exception as e:
+            self.step.setText(tr("Export fehlgeschlagen: {err}", err=f"{type(e).__name__}: {e}"))
+            return
+        self.step.setText(tr("{ext} geschrieben → {path}", ext=os.path.splitext(path)[1].lstrip(".").upper(),
+                             path=os.path.relpath(path, HERE)))
+
+    # ---------- mesh ----------
+    def _export_glb(self):
+        gpath = self.data.get("gpath")
+        if not gpath or (self.glb_worker and self.glb_worker.isRunning()):
+            return
+        from arcpak import models
+        item = models.Item("Browser", os.path.splitext(self.rel.rpartition("/")[2])[0], gpath, "")
+        self.btn_glb.setEnabled(False)
+        self.step.setText(tr("Dekodiere Mesh …"))
+        self.glb_worker = GlbWorker(self, item)
+        self.glb_worker.done.connect(self._glb_done)
+        self.glb_worker.start()
+
+    def _glb_done(self, path, warnings, err):
+        self.btn_glb.setEnabled(True)
+        if err:
+            self.step.setText(tr("GLB-Export fehlgeschlagen: {err}", err=err))
+            return
+        warn = tr(" · {n} Warnungen", n=len(warnings)) if warnings else ""
+        self.step.setText(tr("GLB geschrieben → {path}{warn}", path=os.path.relpath(path, HERE), warn=warn))
+
+    # ---------- map ----------
+    def _goto_maps_tab(self):
+        name = self.data.get("map") or ""
+        self.win.tabs.setCurrentWidget(self.win.maps_tab)
+        for i in range(self.win.map_list.count()):
+            if self.win.map_list.item(i).data(Qt.ItemDataRole.UserRole) == name:
+                self.win.map_list.setCurrentRow(i)
+                break
+        self.accept()
+
+    def closeEvent(self, ev):
+        for w in (self.info_worker, self.image_worker, self.play_worker, self.glb_worker):
+            if w is not None and w.isRunning():
+                try:
+                    w.done.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+        super().closeEvent(ev)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, state=None):
         """state: data kept from the previous window when the UI is rebuilt for a new language
@@ -181,14 +512,25 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
         self.tabs.addTab(self.make_browser_tab(), tr("Browser"))
-        self.tabs.addTab(self.make_maps_tab(), tr("Karten"))
+        self.maps_tab = self.make_maps_tab()
+        self.tabs.addTab(self.maps_tab, tr("Karten"))
         self.models_tab = ModelsTab(self, state.get("models"))
         self.tabs.addTab(self.models_tab, tr("Modelle"))
-        self.tabs.currentChanged.connect(
-            lambda i: self.models_tab.ensure_loaded() if self.tabs.widget(i) is self.models_tab else None)
+        self.audio_tab = AudioTab(self, state.get("audio"))
+        self.tabs.addTab(self.audio_tab, tr("Audio"))
+        self.textures_tab = TexturesTab(self, state.get("textures"))
+        self.tabs.addTab(self.textures_tab, tr("Texturen"))
+        self.tabs.currentChanged.connect(self.tab_shown)
         self.tabs.addTab(self.make_inventory_tab(), tr("Bestand"))
         self.status = self.statusBar()
         self.reload(state.get("containers"))
+
+    def tab_shown(self, index):
+        """Tabs load their (heavy) catalogue in a background thread the first time they appear."""
+        w = self.tabs.widget(index)
+        for tab in (self.models_tab, self.audio_tab, self.textures_tab):
+            if w is tab:
+                tab.ensure_loaded()
 
     # ---------- Browser tab ----------
     def make_browser_tab(self):
@@ -211,6 +553,8 @@ class MainWindow(QMainWindow):
         self.tree.setHeaderLabels([tr("Pfad"), tr("Größe"), tr("Typ"), tr("Container")])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.setUniformRowHeights(True)
+        self.tree.itemDoubleClicked.connect(self.show_file_info)
+        self.tree.setToolTip(tr("Doppelklick auf eine Datei: Vorschau, Abspielen, Export, Details"))
         spl = QHBoxLayout()
         spl.addWidget(self.container_box)
         spl.addWidget(self.tree, 1)
@@ -289,6 +633,14 @@ class MainWindow(QMainWindow):
             top.setExpanded(True)
         self.status.showMessage(tr("Container {name}: {shown}/{total} Dateien angezeigt",
                                    name=c.base, shown=added, total=len(c.entries)))
+
+    # ---------- file info ----------
+    def show_file_info(self, item, _column=0):
+        """Double-click in the browser: open the per-kind info dialog for that file."""
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data is None:
+            return                                  # a folder — nothing to show
+        FileInfoDialog(self, *data).exec()
 
     # ---------- extraction ----------
     def _collect(self, items, jobs, seen):
@@ -682,8 +1034,11 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             QMessageBox.information(self, tr("Karten"), tr("Es läuft schon ein Export — Log beobachten."))
             return
-        state = {"containers": self.containers, "models": self.models_tab.state()}
+        state = {"containers": self.containers, "models": self.models_tab.state(),
+                 "audio": self.audio_tab.state(), "textures": self.textures_tab.state()}
         self.models_tab.release()
+        self.audio_tab.release()
+        self.textures_tab.release()
         win = MainWindow(state)
         win.setGeometry(self.geometry())
         win.show()

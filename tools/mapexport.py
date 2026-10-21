@@ -9,11 +9,14 @@
     python tools/mapexport.py all        [Map ...] [--ratio=0.25] [--ohne-vereinfachen] [--ohne-crop]
                                          [--mit-blaettern] [--mit-effekten] [--mit-hilfsgeo]
                                          [--mit-decals] [--ab=<Map>] [--neu]
+    python tools/mapexport.py textures   list|info|export …   (own help: call `textures` bare)
+    python tools/mapexport.py audio      list|info|export …   (own help: call `audio` bare)
 
 Steps: placements (all static-mesh placements of a map -> out/map/<Map>_placements.jsonl),
 playarea (walkable area -> out/map/<Map>_playarea.json; exit code 3 = the map has none),
 glb (GLB of the map -> out/map/<Map>.glb). `all` runs every map in turn, simplifies the result
-with Blender and writes one log per map to out/map/logs/.
+with Blender and writes one log per map to out/map/logs/. textures/audio are the browsable
+catalogues: PNG -> out/textures/, WAV + UEBA (.binka) -> out/audio/.
 """
 import os
 import re
@@ -23,7 +26,8 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STEPS = {"placements": "arcpak.placements", "playarea": "arcpak.playarea", "glb": "arcpak.mapglb"}
+STEPS = {"placements": "arcpak.placements", "playarea": "arcpak.playarea", "glb": "arcpak.mapglb",
+         "audio": "arcpak.audio", "textures": "arcpak.texture"}
 EXIT_NO_PLAYAREA = 3
 
 

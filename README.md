@@ -2,7 +2,9 @@
 
 Liest die Spieldateien von ARC Raiders offline (IoStore/Zen, reines Python) und baut daraus GLBs:
 ganze Karten (Gebäude, Props, Vegetation, Terrain) sowie einzelne Modelle — Waffen, ARC-Bots,
-Ausrüstung und komplette Charakter-Outfits. Läuft unter Windows und Linux.
+Ausrüstung und komplette Charakter-Outfits. Dazu zeigt die GUI die Klang- und Textur-Bestände des
+Spiels, exportiert WAV, UEBA-Container und PNG, und im Datei-Browser gibt ein Doppelklick
+Vorschau, Wiedergabe oder Export zu jeder Datei. Läuft unter Windows und Linux.
 
 ## Start
 
@@ -35,6 +37,8 @@ oder **In Blender öffnen**.
 - **Charaktere** sind die Outfits aus `Items/Characters/Skins/Outfit/`: alle Teile in der
   Standard-Einstellung (Helm auf/ab, Kapuze … wie im Spiel voreingestellt), dazu wahlweise der
   Grundkörper und eines der 18 Gesichter.
+- **Ausrüstung** (Tab „Ausrüstung“): Rucksäcke, Werkzeug und die deployaren Rüstungs-Körper
+  (Light/Medium/Heavy) mit ihren Falt-, Deploy- und Beschädigungs-Animationen.
 - **Texturen** (Checkbox): die Grundfarben-Texturen werden ins GLB eingebettet (PNG), in der
   Vorschau als Vertexfarben gezeigt. Outfits bekommen die Farben ihrer Standard-Farbvariante — das
   Spiel setzt sie im Shader aus Farbmaske und Farbschema zusammen, das wird hier nachgebaut.
@@ -42,11 +46,65 @@ oder **In Blender öffnen**.
   statische Waffenteile hängen an ihrem Knochen. Outfit-Teile teilen sich ein gemeinsames Skelett.
 - **Animationen** (Checkbox, Bots/Waffen/Ausrüstung): alle Clips des Skeletts werden als
   glTF-Animationen eingebettet (in Blender im Action-Editor wählbar). In der Vorschau lassen sie
-  sich unter dem 3D-Fenster auswählen, abspielen und mit dem Schieber durchfahren. Unterstützt ist das
-  Standard-Format der Engine; ACL-komprimierte Clips werden übersprungen. Prozedurale Bewegungen
+  sich unter dem 3D-Fenster auswählen, abspielen und mit dem Schieber durchfahren. Unterstützt sind
+  das Standard-Format der Engine, PerTrack-komprimierte Clips (z. B. Courier) und ACL-komprimierte
+  Clips; additive Clips werden auf die Ruhepose gerechnet (die Basisanimation, über die das
+  Spiel sie blendet, gibt es offline nicht). Prozedurale Bewegungen
   (z. B. das normale Laufen vieler Bots) stehen nicht als Clip in den Spieldaten.
 - Geometrie ist LOD0.
 - Die 3D-Vorschau braucht `pyqtgraph` und `PyOpenGL`, Texturen brauchen `Pillow` (alles in `requirements.txt`).
+
+## Audio
+
+Tab **Audio**: alle Sounds des Spiels durchblättern (≈55 000 Assets, davon ≈47 000 mit Klangdaten) —
+mit Dauer, Samplerate, Kanälen und Format; filtern, einzeln oder in Serie exportieren (`out/audio/`).
+
+Zwei Formate liegen in den Spieldaten:
+
+- **Roh-PCM (16-bit)** — kurze Waffen-/Mechanik-Klänge: exportiert als abspielbare **WAV**.
+- **BinkA** — der Sound-Codec der Engine. Er ist proprietär (RAD Game Tools); MapExporter hat
+  keinen eigenen Decoder. Die Soundblöcke werden byte-genau in einen UEBA-Container (`.binka`)
+  neu eingebettet — mit korrektem Header und Suchtabelle, in Unreal abspielbar. Mit der Checkbox
+  „unveränderte .ubulk“ lässt sich die Klangdatei auch einfach raw kopieren.
+
+Der Knopf **▶ Anhören** spielt den ausgewählten Klang ab: Roh-PCM sofort als WAV; BinkA dekodiert
+er über das **externe FFmpeg**, dessen `binka`-Demuxer UEBA ab **Version 8.1** liest — ohne
+passendes FFmpeg sagt die GUI das offen und es bleibt der .binka-Weg.
+
+SoundCues, Attenuationen und Curves enthalten keine Klangdaten (nur Namen) — sie sind standardmäßig
+ausgeblendet („Meta-Assets zeigen“).
+
+## Texturen
+
+Tab **Texturen**: alle gekochten Texturen (≈14 600 `T_…`-Pakete) mit Dateigröße, Vorschau und
+PNG-Export (`out/textures/`). Dekodiert werden BC1/BC3/BC5 (DXT1/3/5), BC4, BC7 und die
+unkomprimierten Formate — alles, was ARC verwendet. Die Größe der Vorschau ist wählbar (bis 4096 px, Standard
+2048 px); das größte Mip bis zu dieser Größe wird exportiert — Texturen ohne Mip-Kette (viele
+UI-Bilder) nehmen ihren einzigen Mip. Normalmaps im Zwei-Kanal-Format (BC5) zeigt die Vorschau mit
+rekonstruierter Z-Komponente, so wie das Spiel sie einfärbt. Roughness und Masken sitzen oft im
+Alphakanal — mit „Alphakanal behalten“ bleibt er im PNG, sonst ist das PNG dreikanalig (RGB).
+
+**Farbrichtig behandelt:** manche Farb-Texturen sind in den Spieldaten linear gespeichert (ihr
+`SRGB`-Flag ist aus) — ohne Korrektur wirken sie dunkel. Vorschau, PNG-Export und die in GLBs
+eingebetteten Texturen entzerren solche Dateien per Gamma. Normal-, Rauheits- und echte Mask-
+Texturen (`…_ColorMask`) bleiben unbearbeitet; heißt eine linear gespeicherte Textur dagegen nach
+ihrem Item (`T_Gasmask_BaseColor`, `T_Backpack_BaseColor`), ist sie eine Farbkarte und wird
+entzerrt. Der Farbraum steht als Text bei jeder Vorschau (z. B. „linear (Farbe → entzerrt)“).
+
+## Datei-Browser: Doppelklick
+
+Im Tab **Browser** öffnet ein Doppelklick auf eine Datei ein Info-Fenster, passend zum Dateityp:
+
+- **Textur** → Vorschaubild, Farbraum, **Als PNG exportieren**
+- **Klang** → Dauer/Rate/Kanäle, **▶ Anhören**, **Als WAV** (Roh-PCM) bzw. **Als UEBA (.binka)**
+- **StaticMesh/SkeletalMesh** → **Als GLB exportieren** (direkt dekodiert, mit Texturen, nach
+  `out/models/Browser/`)
+- **Karte (.umap)** → Sprung zum Karten-Tab mit vorausgewählter Karte
+- **Beliebiges .uasset** → Liste der Export-Klassen; **.ubulk/.uexp/.upkg** werden über ihr
+  .uasset erklärt. Dazu jeweils „Rohe Datei extrahieren“ (die Containerdatei unverändert).
+
+Engine-Anteile (anderer Mount) sind nicht über `/Game` adressierbar — dort gibt es nur die
+Container-Info.
 
 ## Export-Optionen
 
@@ -79,6 +137,13 @@ python tools/mapexport.py playarea   Maps/PracticeRangeArray/
 python tools/mapexport.py glb        PracticeRangeArray --crop --ohne-blaetter --ohne-effekte --ohne-hilfsgeo --ohne-decals
 python tools/blender_glb.py simplify out/map/PracticeRangeArray.glb out/map/PracticeRangeArray_vereinfacht.glb 0.25
 
+python tools/mapexport.py textures list  --filter=Rock
+python tools/mapexport.py textures export T_Rock_Sand_01 --max=1024      # -> out/textures/
+python tools/mapexport.py audio  list
+python tools/mapexport.py audio  export Weapon_Mechanic_17_Var_01        # WAV oder .binka -> out/audio/
+python tools/mapexport.py audio  export Grab_GuitarAcoustic_04 --wav     # BinkA-Versuch via FFmpeg (>= 8.1), sonst .binka
+python tools/mapexport.py audio  export --alle --raw                     # alle .ubulk unverändert
+
 python tools/mapexport.py all        # alle Karten nacheinander, Logs unter out/map/logs/
 ```
 
@@ -89,8 +154,8 @@ python tools/mapexport.py all        # alle Karten nacheinander, Logs unter out/
 | Pfad | Zweck |
 |---|---|
 | `start.bat`, `start.sh` | Starter Windows / Linux |
-| `tools/arcgui.py`, `tools/models_tab.py` | GUI (Browser, Karten-Export, Modelle, Bestand) |
-| `tools/mapexport.py` | Kommandozeile: placements, playarea, glb, all |
+| `tools/arcgui.py`, `tools/models_tab.py`, `tools/audio_tab.py`, `tools/textures_tab.py` | GUI (Browser, Karten-Export, Modelle, Audio, Texturen, Bestand) |
+| `tools/mapexport.py` | Kommandozeile: placements, playarea, glb, audio, textures, all |
 | `tools/blender_glb.py` | Blender: Polygone vereinfachen, GLB öffnen |
 | `tools/i18n.py`, `tools/lang/` | GUI-Übersetzungen |
 | `arcpak/iostore.py`, `pakfile.py`, `crypto.py` | Container lesen (IoStore, klassische Paks, Theia-Entschlüsselung) |
@@ -98,7 +163,8 @@ python tools/mapexport.py all        # alle Karten nacheinander, Logs unter out/
 | `arcpak/mesh.py`, `uetransform.py`, `gltf.py` | StaticMesh, SkeletalMesh, Spline-Meshes, Landscape, Transformationen, GLB-Writer |
 | `arcpak/models.py` | Modell-Katalog, Waffen- und Outfit-Zusammenbau, Modell-Export |
 | `arcpak/anim.py` | Animationen dekodieren, Clips eines Skeletts finden |
-| `arcpak/texture.py` | Texturen dekodieren (BC1–BC7), Grundfarbe eines Materials bestimmen |
+| `arcpak/texture.py` | Texturen dekodieren (BC1–BC7), Grundfarbe eines Materials bestimmen, Texture-Katalog, PNG-Export |
+| `arcpak/audio.py` | SoundWave-Eigenschaften (Dauer, Rate, Kanäle), WAV-Export (Roh-PCM), UEBA-Container für BinkA |
 | `arcpak/placements.py`, `playarea.py`, `mapglb.py` | die drei Export-Schritte |
 | `arcpak/mapnames.py`, `config.py`, `globaldata.py` | Kartennamen, Einstellungen/Plattform, globale Namenstabellen |
 | `arcpak/theia.c` | C-Kern der Entschlüsselung (vorgebaut: `theia_kern.dll` / `theia_kern.so`) |
