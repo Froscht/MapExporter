@@ -1,135 +1,148 @@
-# MapExporter — ARC Raiders Karte → GLB
+# MapExporter — ARC Raiders maps → GLB
 
-Liest die Spieldateien von ARC Raiders offline (IoStore/Zen, reines Python) und baut daraus GLBs:
-ganze Karten (Gebäude, Props, Vegetation, Terrain) sowie einzelne Modelle — Waffen, ARC-Bots,
-Ausrüstung und komplette Charakter-Outfits. Dazu zeigt die GUI die Klang- und Textur-Bestände des
-Spiels, exportiert WAV, UEBA-Container und PNG, und im Datei-Browser gibt ein Doppelklick
-Vorschau, Wiedergabe oder Export zu jeder Datei. Läuft unter Windows und Linux.
+Reads ARC Raiders' game files offline (IoStore/Zen, pure Python) and builds GLBs from them:
+whole maps (buildings, props, vegetation, terrain) as well as individual models — weapons, ARC bots,
+equipment and complete character outfits. The GUI also browses the game's audio and texture
+assets, exports WAV, UEBA containers and PNG, and in the file browser a double-click gives
+preview, playback or export for every file. Runs on Windows and Linux.
 
-## Start
+## Screenshots
 
-- **Windows:** `start.bat` doppelklicken. Beim ersten Start werden die Python-Pakete aus
-  `requirements.txt` automatisch installiert.
+| Maps tab — map list and export options | Models tab — weapon with textured 3D preview |
+|---|---|
+| ![Maps tab](docs/screenshots/maps.png) | ![Models tab](docs/screenshots/models.png) |
+
+| Textures tab — preview and PNG export | Audio tab — sound catalogue with durations |
+|---|---|
+| ![Textures tab](docs/screenshots/textures.png) | ![Audio tab](docs/screenshots/audio.png) |
+
+## Getting started
+
+- **Windows:** double-click `start.bat`. On the first start it installs the Python packages from
+  `requirements.txt` automatically.
 - **Linux:** `./start.sh`
 
-In der GUI: Tab **Karten** → Karte wählen → Export-Optionen → **Exportieren**. Fortschritt und
-Gesamtzeit stehen unter den Knöpfen, das Ergebnis liegt in `out/map/`.
+In the GUI: tab **Maps** → pick a map → export options → **Export**. Progress and total time appear
+under the buttons; the result lands in `out/map/`.
 
-## Voraussetzungen
+## Requirements
 
-- Python 3.10+ mit `pip install -r requirements.txt` (pycryptodome, numpy, PyQt6)
-- ARC Raiders über Steam installiert. Der Paks-Ordner wird in den Steam-Bibliotheken automatisch
-  gefunden (Windows über Registry + `libraryfolders.vdf`, Linux unter `~/.local/share/Steam`).
-  Anderer Pfad oder neuer AES-Key nach einem Patch: in der GUI unter **Einstellungen**
-  (wird in `arcpak/settings.json` gespeichert).
-- Blender (4.x/5.x) nur für „Polygone vereinfachen“ und „In Blender öffnen“. Gesucht wird
-  `$BLENDER`, dann `blender` im PATH, unter Windows zusätzlich
+- Python 3.10+ with `pip install -r requirements.txt` (pycryptodome, numpy, PyQt6)
+- ARC Raiders installed via Steam. The Paks folder is found automatically in your Steam libraries
+  (Windows via registry + `libraryfolders.vdf`, Linux under `~/.local/share/Steam`).
+  Different path or a new AES key after a game patch: set it in the GUI under **Settings**
+  (stored in `arcpak/settings.json`).
+- Blender (4.x/5.x) only for "Simplify polygons" and "Open in Blender". Looked up in this order:
+  `$BLENDER`, then `blender` on PATH, on Windows additionally
   `C:\Program Files\Blender Foundation\Blender*\blender.exe`.
 
-## Modelle
+## Models
 
-Tab **Modelle**: Kategorie wählen (Waffen, Bots, Ausrüstung, Charaktere), Modell anklicken →
-drehbare 3D-Vorschau (Maus: drehen, Mausrad: Zoom) → **Als GLB exportieren** (`out/models/<Kategorie>/`)
-oder **In Blender öffnen**.
+Tab **Models**: pick a category (Weapons, Bots, Equipment, Characters), click a model →
+rotatable 3D preview (mouse: rotate, wheel: zoom) → **Export as GLB** (`out/models/<category>/`)
+or **Open in Blender**.
 
-- **Waffen** werden wie im Spiel zusammengesetzt (`DA_WeaponVisuals_*`): Grundkörper plus Teile an
-  ihren Knochen/Sockeln (Griff, Schlitten, Schaft, Visier …).
-- **Charaktere** sind die Outfits aus `Items/Characters/Skins/Outfit/`: alle Teile in der
-  Standard-Einstellung (Helm auf/ab, Kapuze … wie im Spiel voreingestellt), dazu wahlweise der
-  Grundkörper und eines der 18 Gesichter.
-- **Ausrüstung** (Tab „Ausrüstung“): Rucksäcke, Werkzeug und die deployaren Rüstungs-Körper
-  (Light/Medium/Heavy) mit ihren Falt-, Deploy- und Beschädigungs-Animationen.
-- **Texturen** (Checkbox): die Grundfarben-Texturen werden ins GLB eingebettet (PNG), in der
-  Vorschau als Vertexfarben gezeigt. Outfits bekommen die Farben ihrer Standard-Farbvariante — das
-  Spiel setzt sie im Shader aus Farbmaske und Farbschema zusammen, das wird hier nachgebaut.
-- **Skelett:** SkeletalMeshes werden mit Knochen und Skin-Gewichten exportiert (in Blender posierbar);
-  statische Waffenteile hängen an ihrem Knochen. Outfit-Teile teilen sich ein gemeinsames Skelett.
-- **Animationen** (Checkbox, Bots/Waffen/Ausrüstung): alle Clips des Skeletts werden als
-  glTF-Animationen eingebettet (in Blender im Action-Editor wählbar). In der Vorschau lassen sie
-  sich unter dem 3D-Fenster auswählen, abspielen und mit dem Schieber durchfahren. Unterstützt sind
-  das Standard-Format der Engine, PerTrack-komprimierte Clips (z. B. Courier) und ACL-komprimierte
-  Clips; additive Clips werden auf die Ruhepose gerechnet (die Basisanimation, über die das
-  Spiel sie blendet, gibt es offline nicht). Prozedurale Bewegungen
-  (z. B. das normale Laufen vieler Bots) stehen nicht als Clip in den Spieldaten.
-- Geometrie ist LOD0.
-- Die 3D-Vorschau braucht `pyqtgraph` und `PyOpenGL`, Texturen brauchen `Pillow` (alles in `requirements.txt`).
+- **Weapons** are assembled like in the game (`DA_WeaponVisuals_*`): main body plus parts hanging
+  on their bones/sockets (grip, slide, stock, sight …).
+- **Characters** are the outfits from `Items/Characters/Skins/Outfit/`: all pieces in their
+  standard setting (helmet on/off, hood … exactly as the game presets them), optionally the
+  base body and one of the 18 faces.
+- **Equipment** (tab "Equipment"): backpacks, tools and the deployable armor bodies
+  (Light/Medium/Heavy) with their folding, deploy and damage animations.
+- **Textures** (checkbox): the base-color textures are embedded in the GLB (PNG) and shown as
+  vertex colors in the preview. Outfits get the colors of their standard color variant — the game
+  composes them in the shader from a color mask and a color scheme; this reproduces that.
+- **Skeleton:** SkeletalMeshes export with bones and skin weights (posable in Blender); static
+  weapon parts hang on their bone. Outfit pieces share one common skeleton.
+- **Animations** (checkbox, bots/weapons/equipment): all clips of the skeleton are embedded as
+  glTF animations (selectable in Blender's Action editor). In the preview they can be selected
+  under the 3D window, played and scrubbed with a slider. Supported are the engine's standard
+  format, PerTrack-compressed clips (e.g. Courier) and ACL-compressed clips; additive clips are
+  baked onto the rest pose (the base animation the game blends them over does not exist offline).
+  Procedural movement (e.g. the regular walking of many bots) is not stored as a clip in the
+  game data.
+- Geometry is LOD0.
+- The 3D preview needs `pyqtgraph` and `PyOpenGL`, textures need `Pillow` (all in `requirements.txt`).
 
 ## Audio
 
-Tab **Audio**: alle Sounds des Spiels durchblättern (≈55 000 Assets, davon ≈47 000 mit Klangdaten) —
-mit Dauer, Samplerate, Kanälen und Format; filtern, einzeln oder in Serie exportieren (`out/audio/`).
+Tab **Audio**: browse every sound in the game (≈55,000 assets, ≈47,000 with sound data) —
+with duration, sample rate, channels and format; filter, export one at a time or in batches
+(`out/audio/`).
 
-Zwei Formate liegen in den Spieldaten:
+Two formats live in the game data:
 
-- **Roh-PCM (16-bit)** — kurze Waffen-/Mechanik-Klänge: exportiert als abspielbare **WAV**.
-- **BinkA** — der Sound-Codec der Engine. Er ist proprietär (RAD Game Tools); MapExporter hat
-  keinen eigenen Decoder. Die Soundblöcke werden byte-genau in einen UEBA-Container (`.binka`)
-  neu eingebettet — mit korrektem Header und Suchtabelle, in Unreal abspielbar. Mit der Checkbox
-  „unveränderte .ubulk“ lässt sich die Klangdatei auch einfach raw kopieren.
+- **Raw PCM (16-bit)** — short weapon/mechanic sounds: exported as playable **WAV**.
+- **BinkA** — the engine's audio codec. It is proprietary (RAD Game Tools); MapExporter has no
+  decoder of its own. The sound blocks are re-embedded byte-exact into a UEBA container
+  (`.binka`) — with correct header and seek table, playable in Unreal. The "unmodified .ubulk"
+  checkbox also copies the raw sound file as-is.
 
-Der Knopf **▶ Anhören** spielt den ausgewählten Klang ab: Roh-PCM sofort als WAV; BinkA dekodiert
-er über das **externe FFmpeg**, dessen `binka`-Demuxer UEBA ab **Version 8.1** liest — ohne
-passendes FFmpeg sagt die GUI das offen und es bleibt der .binka-Weg.
+The **▶ Play** button plays the selected sound: raw PCM immediately as WAV; BinkA is decoded via
+**external FFmpeg**, whose `binka` demuxer reads UEBA from **version 8.1** — without a suitable
+FFmpeg the GUI says so openly and the .binka route remains.
 
-SoundCues, Attenuationen und Curves enthalten keine Klangdaten (nur Namen) — sie sind standardmäßig
-ausgeblendet („Meta-Assets zeigen“).
+SoundCues, attenuations and curves contain no sound data (names only) — hidden by default
+("Show meta assets").
 
-## Texturen
+## Textures
 
-Tab **Texturen**: alle gekochten Texturen (≈14 600 `T_…`-Pakete) mit Dateigröße, Vorschau und
-PNG-Export (`out/textures/`). Dekodiert werden BC1/BC3/BC5 (DXT1/3/5), BC4, BC7 und die
-unkomprimierten Formate — alles, was ARC verwendet. Die Größe der Vorschau ist wählbar (bis 4096 px, Standard
-2048 px); das größte Mip bis zu dieser Größe wird exportiert — Texturen ohne Mip-Kette (viele
-UI-Bilder) nehmen ihren einzigen Mip. Normalmaps im Zwei-Kanal-Format (BC5) zeigt die Vorschau mit
-rekonstruierter Z-Komponente, so wie das Spiel sie einfärbt. Roughness und Masken sitzen oft im
-Alphakanal — mit „Alphakanal behalten“ bleibt er im PNG, sonst ist das PNG dreikanalig (RGB).
+Tab **Textures**: all cooked textures (≈14,600 `T_…` packages) with file size, preview and
+PNG export (`out/textures/`). Decoded are BC1/BC3/BC5 (DXT1/3/5), BC4, BC7 and the uncompressed
+formats — everything ARC uses. Preview size is selectable (up to 4096 px, default 2048 px);
+the largest mip up to that size is exported — textures without a mip chain (many UI images) take
+their only mip. Two-channel normal maps (BC5) are shown in the preview with a reconstructed
+Z component, the way the game shades them. Roughness and mask data often sit in the alpha channel
+— with "Keep alpha channel" it stays in the PNG, otherwise the PNG is RGB.
 
-**Farbrichtig behandelt:** manche Farb-Texturen sind in den Spieldaten linear gespeichert (ihr
-`SRGB`-Flag ist aus) — ohne Korrektur wirken sie dunkel. Vorschau, PNG-Export und die in GLBs
-eingebetteten Texturen entzerren solche Dateien per Gamma. Normal-, Rauheits- und echte Mask-
-Texturen (`…_ColorMask`) bleiben unbearbeitet; heißt eine linear gespeicherte Textur dagegen nach
-ihrem Item (`T_Gasmask_BaseColor`, `T_Backpack_BaseColor`), ist sie eine Farbkarte und wird
-entzerrt. Der Farbraum steht als Text bei jeder Vorschau (z. B. „linear (Farbe → entzerrt)“).
+**Color-managed:** some color textures are stored linearly in the game data (their `SRGB` flag is
+off) — uncorrected they look dark. Preview, PNG export and the textures embedded in GLBs apply a
+gamma correction to such files. Normal, roughness and true mask textures (`…_ColorMask`) stay
+untouched; but a linearly stored texture named after its item (`T_Gasmask_BaseColor`,
+`T_Backpack_BaseColor`) is a color map and gets corrected. The color space is shown as text at
+every preview (e.g. "linear (color → corrected)").
 
-## Datei-Browser: Doppelklick
+## File browser: double-click
 
-Im Tab **Browser** öffnet ein Doppelklick auf eine Datei ein Info-Fenster, passend zum Dateityp:
+In the **Browser** tab, a double-click on a file opens an info window fitted to the file type:
 
-- **Textur** → Vorschaubild, Farbraum, **Als PNG exportieren**
-- **Klang** → Dauer/Rate/Kanäle, **▶ Anhören**, **Als WAV** (Roh-PCM) bzw. **Als UEBA (.binka)**
-- **StaticMesh/SkeletalMesh** → **Als GLB exportieren** (direkt dekodiert, mit Texturen, nach
+- **Texture** → preview image, color space, **Export as PNG**
+- **Sound** → duration/rate/channels, **▶ Play**, **As WAV** (raw PCM) or **As UEBA (.binka)**
+- **StaticMesh/SkeletalMesh** → **Export as GLB** (decoded directly, with textures, to
   `out/models/Browser/`)
-- **Karte (.umap)** → Sprung zum Karten-Tab mit vorausgewählter Karte
-- **Beliebiges .uasset** → Liste der Export-Klassen; **.ubulk/.uexp/.upkg** werden über ihr
-  .uasset erklärt. Dazu jeweils „Rohe Datei extrahieren“ (die Containerdatei unverändert).
+- **Map (.umap)** → jump to the Maps tab with the map preselected
+- **Any .uasset** → list of export classes; **.ubulk/.uexp/.upkg** are explained through their
+  .uasset. Each comes with "Extract raw file" (the container file unmodified).
 
-Engine-Anteile (anderer Mount) sind nicht über `/Game` adressierbar — dort gibt es nur die
-Container-Info.
+![Browser tab with filtered file tree](docs/screenshots/browser.png)
 
-## Export-Optionen
+Engine content (a different mount) is not addressable via `/Game` — there only the container info
+is shown.
 
-| Option | Wirkung |
+## Export options
+
+| Option | Effect |
 |---|---|
-| Auf Spielbereich zuschneiden | nur der begehbare Bereich (BlockingVolumes + Flutfüllung ab PlayerStart); Karten ohne Spielbereich werden automatisch ohne Zuschnitt exportiert |
-| Baumblätter entfernen | Blatt-/Nadel-Sektionen weg, Stämme bleiben |
-| Effekt-Meshes entfernen | Rauchsäulen, Lichtstrahlen, Laub-Partikel (`/Game/Pioneer/Effects/`) |
-| Unsichtbare Hilfsgeometrie entfernen | Licht-Geometrie und Lichtblocker, Licht-Portale, Himmels-/Wolkenkugeln, Occluder, Editor-Meshes, Grundformen mit Debug-Material |
-| Decal-Flächen entfernen | Flecken, Graffiti, Risse, Fahrbahnmarkierungen — ohne Texturen nur graue Flächen |
-| Polygone vereinfachen | Blender headless, Decimate je Mesh |
+| Crop to play area | only the walkable area (blocking volumes + flood fill from PlayerStart); maps without a play area are exported without cropping automatically |
+| Remove tree foliage | leaf/needle sections dropped, trunks stay |
+| Remove effect meshes | smoke plumes, light shafts, leaf particles (`/Game/Pioneer/Effects/`) |
+| Remove invisible helper geometry | light geometry and light blockers, light portals, sky/cloud spheres, occluders, editor meshes, base shapes with debug material |
+| Remove decal planes | stains, graffiti, cracks, road markings — without textures just gray planes |
+| Simplify polygons | headless Blender, decimate per mesh |
 
-Im Spiel versteckte Komponenten (`bHiddenInGame` / `bVisible`, auch aus Blueprint-Vorlagen) werden
-immer weggelassen.
+Components hidden in the game (`bHiddenInGame` / `bVisible`, including from blueprint templates)
+are always left out.
 
-## Sprache und Kartennamen
+## Language and map names
 
-- GUI-Sprache oben rechts (Deutsch, English, Français, Español, Italiano, Polski, Português,
-  Русский, 简体中文, 日本語). Texte in `tools/lang/<code>.json`, Schlüssel = deutscher Text.
-  Neue Sprache: `en.json` kopieren, übersetzen, in `tools/i18n.py` unter `LANGUAGES` eintragen.
-- Kartennamen („Dam Battlegrounds“, „Stella Montis“ …) kommen aus den String-Tabellen des Spiels.
-  Übersetzte Namen stehen in `Game.locres` in den klassischen `.pak`-Dateien und brauchen den
-  aktuellen AES-Key aus den Einstellungen; ohne gültigen Key bleiben die Namen englisch.
+- GUI language top-right (Deutsch, English, Français, Español, Italiano, Polski, Português,
+  Русский, 简体中文, 日本語). Texts live in `tools/lang/<code>.json`, keys are the German text.
+  New language: copy `en.json`, translate it, add an entry to `LANGUAGES` in `tools/i18n.py`.
+- Map names ("Dam Battlegrounds", "Stella Montis" …) come from the game's string tables.
+  Translated names are in `Game.locres` inside the classic `.pak` files and need the current
+  AES key from Settings; without a valid key the names stay English.
 
-## Kommandozeile
+## Command line
 
 ```bash
 python tools/mapexport.py placements Maps/PracticeRangeArray/
@@ -138,52 +151,52 @@ python tools/mapexport.py glb        PracticeRangeArray --crop --ohne-blaetter -
 python tools/blender_glb.py simplify out/map/PracticeRangeArray.glb out/map/PracticeRangeArray_vereinfacht.glb 0.25
 
 python tools/mapexport.py textures list  --filter=Rock
-python tools/mapexport.py textures export T_Rock_Sand_01 --max=1024      # -> out/textures/
+python tools/mapexport.py textures export T_RockChip_01_C --max=1024    # -> out/textures/
 python tools/mapexport.py audio  list
-python tools/mapexport.py audio  export Weapon_Mechanic_17_Var_01        # WAV oder .binka -> out/audio/
-python tools/mapexport.py audio  export Grab_GuitarAcoustic_04 --wav     # BinkA-Versuch via FFmpeg (>= 8.1), sonst .binka
-python tools/mapexport.py audio  export --alle --raw                     # alle .ubulk unverändert
+python tools/mapexport.py audio  export Weapon_Mechanic_17_Var_01       # WAV or .binka -> out/audio/
+python tools/mapexport.py audio  export Grab_GuitarAcoustic_04 --wav    # BinkA attempt via FFmpeg (>= 8.1), else .binka
+python tools/mapexport.py audio  export --alle --raw                    # all .ubulk unmodified
 
-python tools/mapexport.py all        # alle Karten nacheinander, Logs unter out/map/logs/
+python tools/mapexport.py all        # all maps one after another, logs under out/map/logs/
 ```
 
-`python tools/mapexport.py` ohne Argumente zeigt alle Optionen.
+`python tools/mapexport.py` without arguments lists all options.
 
-## Aufbau
+## Layout
 
-| Pfad | Zweck |
+| Path | Purpose |
 |---|---|
-| `start.bat`, `start.sh` | Starter Windows / Linux |
-| `tools/arcgui.py`, `tools/models_tab.py`, `tools/audio_tab.py`, `tools/textures_tab.py` | GUI (Browser, Karten-Export, Modelle, Audio, Texturen, Bestand) |
-| `tools/mapexport.py` | Kommandozeile: placements, playarea, glb, audio, textures, all |
-| `tools/blender_glb.py` | Blender: Polygone vereinfachen, GLB öffnen |
-| `tools/i18n.py`, `tools/lang/` | GUI-Übersetzungen |
-| `arcpak/iostore.py`, `pakfile.py`, `crypto.py` | Container lesen (IoStore, klassische Paks, Theia-Entschlüsselung) |
-| `arcpak/zen.py`, `usmap.py`, `game.py` | Pakete, Property-Schema, Eigenschaften und Vorlagen |
-| `arcpak/mesh.py`, `uetransform.py`, `gltf.py` | StaticMesh, SkeletalMesh, Spline-Meshes, Landscape, Transformationen, GLB-Writer |
-| `arcpak/models.py` | Modell-Katalog, Waffen- und Outfit-Zusammenbau, Modell-Export |
-| `arcpak/anim.py` | Animationen dekodieren, Clips eines Skeletts finden |
-| `arcpak/texture.py` | Texturen dekodieren (BC1–BC7), Grundfarbe eines Materials bestimmen, Texture-Katalog, PNG-Export |
-| `arcpak/audio.py` | SoundWave-Eigenschaften (Dauer, Rate, Kanäle), WAV-Export (Roh-PCM), UEBA-Container für BinkA |
-| `arcpak/placements.py`, `playarea.py`, `mapglb.py` | die drei Export-Schritte |
-| `arcpak/mapnames.py`, `config.py`, `globaldata.py` | Kartennamen, Einstellungen/Plattform, globale Namenstabellen |
-| `arcpak/theia.c` | C-Kern der Entschlüsselung (vorgebaut: `theia_kern.dll` / `theia_kern.so`) |
-| `usmap/SDK_Mappings.usmap` | Property-Schema; nach einem Spiel-Patch durch einen neuen Dump ersetzen |
+| `start.bat`, `start.sh` | launchers Windows / Linux |
+| `tools/arcgui.py`, `tools/models_tab.py`, `tools/audio_tab.py`, `tools/textures_tab.py` | GUI (browser, map export, models, audio, textures, inventory) |
+| `tools/mapexport.py` | command line: placements, playarea, glb, audio, textures, all |
+| `tools/blender_glb.py` | Blender: simplify polygons, open GLB |
+| `tools/i18n.py`, `tools/lang/` | GUI translations |
+| `arcpak/iostore.py`, `pakfile.py`, `crypto.py` | reading containers (IoStore, classic paks, Theia decryption) |
+| `arcpak/zen.py`, `usmap.py`, `game.py` | packages, property schema, properties and templates |
+| `arcpak/mesh.py`, `uetransform.py`, `gltf.py` | StaticMesh, SkeletalMesh, spline meshes, Landscape, transforms, GLB writer |
+| `arcpak/models.py` | model catalog, weapon and outfit assembly, model export |
+| `arcpak/anim.py` | decoding animations, finding a skeleton's clips |
+| `arcpak/texture.py` | texture decoding (BC1–BC7), determining a material's base color, texture catalog, PNG export |
+| `arcpak/audio.py` | SoundWave properties (duration, rate, channels), WAV export (raw PCM), UEBA container for BinkA |
+| `arcpak/placements.py`, `playarea.py`, `mapglb.py` | the three export steps |
+| `arcpak/mapnames.py`, `config.py`, `globaldata.py` | map names, settings/platform, global name tables |
+| `arcpak/theia.c` | C core of the decryption (prebuilt: `theia_kern.dll` / `theia_kern.so`) |
+| `usmap/SDK_Mappings.usmap` | property schema; replace with a fresh dump after a game patch |
 
-`cache/` (Namenstabellen) und `out/` werden bei Bedarf erzeugt.
+`cache/` (name tables) and `out/` are created on demand.
 
-## Hinweise
+## Notes
 
-- Schema-Quelle: `$ARC_USMAP`, sonst `usmap/SDK_Mappings.usmap`. Keine usmap-Dateien mischen.
-- Bei großen Karten ist der Spielbereich eine Näherung über die NavMeshBoundsVolume-Box
-  (Ausgabe „WARNUNG … Näherung“).
-- Große Karten haben 60 000–150 000 Objekte; Blender öffnet sie entsprechend langsam.
-- Den C-Kern neu bauen: `cc -O2 -shared -fPIC -o arcpak/theia_kern.so arcpak/theia.c`
-  (Windows z. B. `zig cc -O2 -shared -target x86_64-windows-gnu -o arcpak/theia_kern.dll arcpak/theia.c`).
-  Ohne Kern läuft ein deutlich langsamerer Python-Fallback.
+- Schema source: `$ARC_USMAP`, otherwise `usmap/SDK_Mappings.usmap`. Never mix usmap files.
+- For large maps the play area is an approximation via the NavMeshBoundsVolume box
+  (output "WARNING … approximation").
+- Large maps have 60,000–150,000 objects; Blender opens them accordingly slowly.
+- Rebuild the C core: `cc -O2 -shared -fPIC -o arcpak/theia_kern.so arcpak/theia.c`
+  (Windows e.g. `zig cc -O2 -shared -target x86_64-windows-gnu -o arcpak/theia_kern.dll arcpak/theia.c`).
+  Without the core a much slower Python fallback runs.
 
-## Lizenz
+## License
 
-Apache License 2.0, siehe `LICENSE`. © 2026 [froscht](https://github.com/froscht).
-Teile des Codes basieren auf [CUE4Parse](https://github.com/FabianFG/CUE4Parse) (ebenfalls
-Apache-2.0), siehe `NOTICE`. Nicht mit Embark Studios oder Epic Games verbunden.
+Apache License 2.0, see `LICENSE`. © 2026 [froscht](https://github.com/froscht).
+Parts of the code are based on [CUE4Parse](https://github.com/FabianFG/CUE4Parse) (also
+Apache-2.0), see `NOTICE`. Not affiliated with Embark Studios or Epic Games.
