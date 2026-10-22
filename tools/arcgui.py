@@ -1095,6 +1095,10 @@ class SettingsDialog(QDialog):
 
 
 if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows consoles default to cp1252
+    except AttributeError:
+        pass
     app = QApplication(sys.argv)
     win = MainWindow()
     app.main_window = win

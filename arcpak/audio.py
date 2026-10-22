@@ -27,7 +27,9 @@ duration * rate * channels * 2 bytes long, interleaved stereo. Those export as p
 BinkA is a proprietary codec of RAD Game Tools. MapExporter reads and re-embeds its container
 (playable with Unreal Engine tooling) and leaves the block bitstreams exactly as the game stored
 them; it ships no BinkA decoder. For listening, bink_wav() re-decodes the blocks with an external
-FFmpeg (its own clean-room Bink Audio decoders) — UEBA containers are read by FFmpeg >= 8.1.
+FFmpeg (its own clean-room Bink Audio decoders). Whether that works depends on the FFmpeg build,
+not its version: released FFmpeg (8.x/9.x) only knows the legacy '1FCB' layout and decodes ARCs
+BA2 blocks to garbage, so the capability is probed once and the decoded audio is checked.
 """
 from __future__ import annotations
 
@@ -51,7 +53,7 @@ BLOCK_MAGIC = 0x9999
 TRIM_MARK = 0xFFFF
 SEEK_HEADER_SIZE = 15
 UEBA_HEADER_SIZE = 28
-# the game's decoder never validates the version; FFmpeg (>= 8.1, 'binka' demuxer) probes for 1
+# the game's decoder never validates the version (FFmpeg master's UEBA branch probes for 1)
 UEBA_VERSION = 1
 BA2_FLAGS = 1                                   # "is BA2" marker: always set by UE
 
@@ -334,44 +336,105 @@ def ffmpeg_version() -> str:
         return exe
 
 
-_ueba_ok: bool | None = None        # None = not tried; False = this FFmpeg cannot read UEBA (< 8.1)
+_ueba_ok: bool | None = None        # None = not probed; False = this FFmpeg cannot decode BinkA
 
+# Whether FFmpeg can decode a UEBA container depends on the BUILD, not on the version number.
+# Released FFmpeg (8.x, 9.x) ships a 'binka' demuxer that only knows the legacy '1FCB' layout, and
+# that path never sets the decoder's "Bink Audio 2" extradata — ARCs BA2 blocks then decode to
+# full-scale garbage of the right length. FFmpeg master has a UEBA branch, but it tests
+# AV_RL32(buf) == MKBETAG('U','E','B','A'), which a real "UEBA" file can never satisfy (a
+# little-endian read never equals a big-endian tag). So: never guess from a version string —
+# probe once with a real sound and check the decoded audio.
+BINKA_HINT = ("Dieser FFmpeg-Build dekodiert kein BinkA: der 'binka'-Demuxer kennt nur das alte "
+              "1FCB-Layout und setzt die BA2-Kennung nicht, die ARCs Blöcke brauchen. "
+              "Der .binka-Export (UEBA) bleibt in Unreal abspielbar")
 
-def bink_wav(gpath: str) -> tuple[bytes, dict]:
-    """WAV for a BinkA sound via external FFmpeg (its clean-room Bink Audio decoder):
-    write the rebuilt UEBA container to a temp file, let ffmpeg decode it, return the WAV bytes.
+def _wav_quality(data: bytes, expect_samples: int | None) -> str | None:
+    """None if the decoded WAV looks like audio, else a reason. Catches the classic BinkA failure
+    mode: the demuxer lacks the BA2 extradata, the decoder reads the wrong bit widths and emits
+    full-scale garbage that still has the right length."""
+    import array
+    import io
+    import wave
+    try:
+        with wave.open(io.BytesIO(data)) as w:
+            n, rate = w.getnframes(), w.getframerate()
+            pcm = array.array("h", w.readframes(n))
+    except Exception as e:
+        return f"kein lesbares WAV ({type(e).__name__})"
+    if not pcm:
+        return "leeres WAV"
+    if expect_samples and n and abs(n - expect_samples) > max(expect_samples // 2, rate // 10):
+        return f"Länge {n / max(rate, 1):.2f}s statt {expect_samples / max(rate, 1):.2f}s"
+    clipped = sum(1 for v in pcm if v <= -32768 or v >= 32767)
+    if clipped > len(pcm) // 2:
+        return f"{100 * clipped // len(pcm)} % der Samples am Vollausschlag (Dekoder-Müll)"
+    return None
 
-    FFmpeg reads UEBA only from 8.1 on (binka demuxer) — older versions raise RuntimeError with
-    that hint; the attempt is remembered so repeated calls fail fast."""
-    global _ueba_ok
-    exe = ffmpeg_exe()
-    if not exe:
-        raise RuntimeError("FFmpeg ist nicht installiert — BinkA-Klänge brauchen FFmpeg zum Abspielen")
-    if _ueba_ok is False:
-        raise RuntimeError(f"{ffmpeg_version()} liest UEBA noch nicht (erstmals FFmpeg 8.1) — "
-                           f"Roh-PCM-Klänge gehen ohne FFmpeg")
-    ueba, info = binka_bytes(gpath)
+def _decode(blob: bytes, exe: str) -> bytes:
+    """Run FFmpeg on a container in a temp dir and return the WAV bytes (raises on failure)."""
     import subprocess
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         src, dst = os.path.join(td, "s.binka"), os.path.join(td, "s.wav")
         with open(src, "wb") as f:
-            f.write(ueba)
+            f.write(blob)
         try:
             r = subprocess.run([exe, "-hide_banner", "-loglevel", "error", "-i", src,
-                                "-vn", "-acodec", "pcm_s16le", "-y", dst], capture_output=True, timeout=300)
+                                "-vn", "-acodec", "pcm_s16le", "-y", dst],
+                               capture_output=True, timeout=300)
         except subprocess.TimeoutExpired:
             raise RuntimeError("FFmpeg time out beim Dekodieren")
         if r.returncode != 0 or not os.path.exists(dst) or os.path.getsize(dst) < 44:
-            _ueba_ok = False
-            err = r.stderr.decode("utf-8", "replace").strip().splitlines()
-            raise RuntimeError(f"UEBA ließ sich nicht dekodieren ({err[-1] if err else 'kein WAV'}); "
-                               f"UEBA unterstützt FFmpeg erst ab 8.1 ({ffmpeg_version()})")
-        _ueba_ok = True
+            err = [l for l in r.stderr.decode("utf-8", "replace").splitlines() if l.strip()]
+            raise RuntimeError(err[-1] if err else "FFmpeg erzeugte kein WAV")
         with open(dst, "rb") as f:
-            data = f.read()
-    return data, dict(info, rate=info.get("rate"), file_size=len(data))
+            return f.read()
 
+def ueba_supported() -> bool:
+    """Can the installed FFmpeg decode a UEBA container? Probed once with a real sound and cached."""
+    global _ueba_ok
+    if _ueba_ok is not None:
+        return _ueba_ok
+    exe = ffmpeg_exe()
+    if not exe:
+        return False
+    try:
+        gpath = _probe_sound()
+        if gpath is None:
+            return False
+        ueba, info = binka_bytes(gpath)
+        _ueba_ok = _wav_quality(_decode(ueba, exe), info.get("samples")) is None
+    except Exception:
+        _ueba_ok = False
+    return _ueba_ok
+
+def _probe_sound() -> str | None:
+    """Smallest BinkA sound of the catalogue (the probe should stay cheap)."""
+    cands = [it for it in catalogue() if not it.pcm and it.ubulk]
+    if not cands:
+        return None
+    return min(cands, key=lambda it: it.size or 0).gpath
+
+def bink_wav(gpath: str) -> tuple[bytes, dict]:
+    """WAV for a BinkA sound via external FFmpeg (its clean-room Bink Audio decoder):
+    write the rebuilt UEBA container to a temp file, let ffmpeg decode it, return the WAV bytes.
+
+    Depends on the FFmpeg build, not on its version (see BINKA_HINT): ueba_supported() probes it
+    once, and the decoded audio is quality-checked so garbage is never passed on as a result."""
+    global _ueba_ok
+    exe = ffmpeg_exe()
+    if not exe:
+        raise RuntimeError("FFmpeg ist nicht installiert — BinkA-Klänge brauchen FFmpeg zum Abspielen")
+    if not ueba_supported():
+        raise RuntimeError(f"{BINKA_HINT} ({ffmpeg_version() or exe})")
+    ueba, info = binka_bytes(gpath)
+    data = _decode(ueba, exe)
+    bad = _wav_quality(data, info.get("samples"))
+    if bad:
+        _ueba_ok = False
+        raise RuntimeError(f"BinkA ließ sich nicht dekodieren ({bad}); {BINKA_HINT}")
+    return data, dict(info, file_size=len(data))
 
 def playback_wav(gpath: str) -> tuple[bytes, str]:
     """Playable WAV bytes of any sound: raw PCM directly, BinkA via external FFmpeg.
@@ -456,8 +519,9 @@ HELP = """audio – Klang-Katalog, UEBA- und WAV-Export
 list/info/export lesen die SoundWave-Eigenschaften (Dauer, Samplerate, Kanäle). export schreibt
 Roh-PCM-Klänge als WAV und BinkA-Klänge in einen neu aufgebauten UEBA-Container (.binka, in
 Unreal abspielbar); --raw kopiert die .ubulk unverändert. --wav versucht auch BinkA-Klänge als
-WAV — dafür wird ein externes FFmpeg benutzt (UEBA liest FFmpeg ab 8.1; ältere Versionen fallen
-auf .binka zurück). BinkA ist ein proprietärer Codec von RAD Game Tools — MapExporter selbst hat
+WAV — dafür wird ein externes FFmpeg benutzt; kann der lokale Build BinkA nicht dekodieren (die
+veröffentlichten FFmpeg-Versionen können es nicht), bleibt es bei .binka. BinkA ist ein
+proprietärer Codec von RAD Game Tools — MapExporter selbst hat
 keinen BinkA-Decoder. Ohne --alle blendet list Meta-Assets (SoundCues, Attenuationen …) ohne
 Klangdaten aus.
 """

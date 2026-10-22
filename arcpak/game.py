@@ -1,7 +1,9 @@
 """Shared game-data context and property reader used by the map tools.
 
-Importing this module mounts the game containers and loads everything needed to read cooked
-exports:
+The context (mounted containers, name tables, property schema) is built on FIRST USE, not on
+import: importing this module costs nothing, so `arcpak` stays a plain library. Access it through
+containers() / global_names() / script_map() / schema(); the old module attributes C, GN, smap,
+sch still resolve lazily through module __getattr__ and are equivalent.
     C, GN       mounted IoStore containers, global name table
     smap        script-object map (class names for script imports)
     sch         property schema (usmap)
@@ -129,12 +131,105 @@ KNOWN_VAR_STRUCT = {"SoftObjectPath": _skip_softpath, "SoftClassPath": _skip_sof
                     "PerPlatformBool": _perplatform(4), "PerPlatformFrameRate": _perplatform(8),
                     "SkeletalMeshSamplingLODBuiltData": _skip_weighted_sampler}
 
-# ---------- context -------------------------------------------------------------
-smap = load_script_map(cache=os.path.join(HERE, "cache", "scriptobjects.blob"))
-print("building schema", flush=True)
-sch = usmap.union(SCHEMAS)
-C = iostore.mount_directory(PAKS_DEFAULT)
-GN = load_global_names(cache=os.path.join(HERE, "cache", "globalnames.bin"))
+# ---------- context (lazy) -------------------------------------------------------
+# Building the context costs about a second (mounting 200+ containers, schema union). Keep it out
+# of import time so `import arcpak.placements` is free and the tools can build it once for several
+# steps. _CACHE holds the singletons; reset_context() drops them (after a game patch).
+_CACHE: dict = {}
+
+
+def script_map() -> dict:
+    """Raw FScriptObjectEntry.GlobalIndex -> (bare name, OuterIndex); class names for imports."""
+    if "smap" not in _CACHE:
+        _CACHE["smap"] = load_script_map(cache=os.path.join(HERE, "cache", "scriptobjects.blob"))
+    return _CACHE["smap"]
+
+
+def schema():
+    """usmap property schema (union over SCHEMAS)."""
+    if "sch" not in _CACHE:
+        _CACHE["sch"] = usmap.union(SCHEMAS)
+    return _CACHE["sch"]
+
+
+def containers() -> list:
+    """Mounted IoStore containers (split copies first)."""
+    if "C" not in _CACHE:
+        _CACHE["C"] = iostore.mount_directory(PAKS_DEFAULT)
+    return _CACHE["C"]
+
+
+def global_names() -> list:
+    """Global FName table: index -> name."""
+    if "GN" not in _CACHE:
+        _CACHE["GN"] = load_global_names(cache=os.path.join(HERE, "cache", "globalnames.bin"))
+    return _CACHE["GN"]
+
+
+def templates() -> "Templates":
+    """Shared Templates instance: the package index and the archetype-field caches survive between
+    steps, so a following step (glb after placements) does not re-read the same packages."""
+    if "T" not in _CACHE:
+        _CACHE["T"] = Templates()
+    return _CACHE["T"]
+
+
+class Context:
+    """The game-data context as one object, so steps can take it as an argument instead of
+    reaching into module globals. Every attribute builds its part on first access."""
+
+    @property
+    def smap(self) -> dict:
+        return script_map()
+
+    @property
+    def sch(self):
+        return schema()
+
+    @property
+    def C(self) -> list:
+        return containers()
+
+    @property
+    def GN(self) -> list:
+        return global_names()
+
+    @property
+    def templates(self) -> "Templates":
+        return templates()
+
+
+def context() -> Context:
+    """Context handle; cheap to create, the data behind it is shared."""
+    return Context()
+
+
+class LazyTemplates:
+    """game.templates() behind an attribute proxy: module-level `T = game.LazyTemplates()` touches
+    no container until a step actually reads a field."""
+
+    def __getattr__(self, name):
+        return getattr(templates(), name)
+
+
+def reset_context() -> None:
+    """Forget the mounted context (containers stay open until garbage collected)."""
+    _CACHE.clear()
+    _chain_cache.clear()
+    _index_maps.clear()
+
+
+def __getattr__(name: str):
+    """Module attributes C / GN / smap / sch resolve lazily (PEP 562)."""
+    if name == "C":
+        return containers()
+    if name == "GN":
+        return global_names()
+    if name == "smap":
+        return script_map()
+    if name == "sch":
+        return schema()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 _STEM_PREFIX = re.compile(r"^(?:\.\.?/)+")
 
@@ -153,10 +248,11 @@ def chain_of(cls_name):
     """[derived .. base] struct list."""
     if cls_name in _chain_cache:
         return _chain_cache[cls_name]
-    out, s, seen = [], sch.structs.get(cls_name), 0
+    structs = schema().structs
+    out, s, seen = [], structs.get(cls_name), 0
     while s is not None and seen < 14:
         out.append(s)
-        s = sch.structs.get(s.super) if s.super else None
+        s = structs.get(s.super) if s.super else None
         seen += 1
     _chain_cache[cls_name] = out
     return out
@@ -260,7 +356,7 @@ def read_value(d, p, end, prop, depth=0):
             return q, ("soft", pkg_name, asset_name, sub)
         if sn in KNOWN_VAR_STRUCT:
             return KNOWN_VAR_STRUCT[sn](d, p), sn
-        if sn is None or sn not in sch.structs:
+        if sn is None or sn not in schema().structs:
             raise Unsupported(f"struct {sn!r} not in schema")
         return read_unversioned(d, p, end, sn, depth + 1)
     raise Unsupported(f"type {t}")
@@ -417,8 +513,8 @@ INHERITED = ("StaticMesh", "RelativeLocation", "RelativeRotation", "RelativeScal
 class Templates:
     """Resolve the archetype chain: template index -> (package, public export hash) -> export."""
 
-    def __init__(self, containers=None):
-        self.uidx = iostore.path_index(containers or C, exts=(".uasset",))
+    def __init__(self, container_list=None):
+        self.uidx = iostore.path_index(container_list or containers(), exts=(".uasset",))
         self.by_game = {}
         for k in self.uidx:
             if "/Content/" in k:
@@ -436,7 +532,7 @@ class Templates:
             else:
                 c, ci = self.uidx[k][0]
                 raw = c.get_chunk(ci)
-                pkg = zen.parse_uasset(raw, global_names=GN)
+                pkg = zen.parse_uasset(raw, global_names=global_names())
                 self.pk[gpath] = (raw, pkg, {e.public_hash: e for e in pkg.exports})
         return self.pk[gpath]
 
@@ -451,7 +547,7 @@ class Templates:
         key = (pkg, e.index)
         if key in self.cache:
             return self.cache[key]
-        cls = pkg.export_class(e, script_names=smap)
+        cls = pkg.export_class(e, script_names=script_map())
         out = {}
         try:
             ok, pr, _ = read_component(raw, pkg, e, cls, {}, partial=True)

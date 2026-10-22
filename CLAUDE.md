@@ -16,7 +16,10 @@ pip install -r requirements.txt        # pycryptodome, numpy, PyQt6, pyqtgraph, 
 ./start.sh                             # GUI starten (Linux); Windows: start.bat (installiert Deps beim ersten Start)
 python tools/arcgui.py                 # dito direkt
 
-# Karten-Export (CLI, ein Schritt):
+# Karten-Export (CLI). Schnellster Weg: alle drei Schritte in EINEM Prozess
+python tools/mapexport.py karte PracticeRangeArray --ohne-blaetter --ohne-effekte --ohne-hilfsgeo --ohne-decals
+
+# … oder einzeln (drei Prozesse, je ~1 s Kontext-Aufbau):
 python tools/mapexport.py placements Maps/PracticeRangeArray/
 python tools/mapexport.py playarea   Maps/PracticeRangeArray/
 python tools/mapexport.py glb        PracticeRangeArray --crop --ohne-blaetter --ohne-effekte --ohne-hilfsgeo --ohne-decals
@@ -43,8 +46,8 @@ zig cc -O2 -shared -target x86_64-windows-gnu -o arcpak/theia_kern.dll arcpak/th
 
 Zwei Ebenen, klare Trennung:
 
-- **`arcpak/`** — reine Bibliothek zum Lesen der Spieldaten, keine GUI-Abhängigkeiten. Wird nie direkt gestartet, sondern von `tools/` aufgerufen.
-- **`tools/`** — Einstiegspunkte. Die GUI (`arcgui.py`, `models_tab.py`, `audio_tab.py`, `textures_tab.py`) führt jeden Export-Schritt als **Subprozess** `python tools/mapexport.py <schritt>` aus; `mapexport.py` dispatcht per `runpy` auf `arcpak.placements` / `arcpak.playarea` / `arcpak.mapglb` / `arcpak.audio` / `arcpak.texture` (`__main__`). Modelle, Audio und Texturen laufen in der GUI dagegen als QThread direkt im Prozess (Katalog + Export). Beide Tools-Skripte laufen mit Repo-Root als cwd/sys.path — sie importieren `arcpak.*` und `i18n` flach (nicht `tools.i18n`). Im Browser-Tab öffnet ein Doppelklick die `FileInfoDialog` (`arcgui.py`): `InfoWorker` (QThread) klassifiziert die Datei (`map`/`textur`/`mesh`/`klang`/`uasset`/`fremd`), angeboten werden PNG-/WAV-/GLB-Export, ▶-Wiedergabe (`PlayWorker`) und Karten-Tab-Sprung. Klassifikation braucht den **vollen** Entry-Pfad `mount_point + "/" + rel` — das im Tree gespeicherte `rel` allein verliert pro Chunk Mount-Teile; `game_gpath` erkennt nur das Präfix `../../../PioneerGame/Content/` (Engine-Mounts → „fremd“).
+- **`arcpak/`** — reine Bibliothek zum Lesen der Spieldaten, keine GUI-Abhängigkeiten. Wird nie direkt gestartet, sondern von `tools/` aufgerufen. **Importieren hat keine Seiteneffekte**: kein Container wird gemountet, kein `sys.argv` gelesen. Jeder Export-Schritt ist eine Funktion `run(...)` (plus `main(argv)` für die CLI).
+- **`tools/`** — Einstiegspunkte. Die GUI (`arcgui.py`, `models_tab.py`, `audio_tab.py`, `textures_tab.py`) führt jeden Export-Schritt als **Subprozess** `python tools/mapexport.py <schritt>` aus; `mapexport.py` importiert das Schrittmodul und ruft `run(...)` im eigenen Prozess auf (`karte` verkettet placements → playarea → glb in **einem** Prozess). Modelle, Audio und Texturen laufen in der GUI dagegen als QThread direkt im Prozess (Katalog + Export). Beide Tools-Skripte laufen mit Repo-Root als cwd/sys.path — sie importieren `arcpak.*` und `i18n` flach (nicht `tools.i18n`). Im Browser-Tab öffnet ein Doppelklick die `FileInfoDialog` (`arcgui.py`): `InfoWorker` (QThread) klassifiziert die Datei (`map`/`textur`/`mesh`/`klang`/`uasset`/`fremd`), angeboten werden PNG-/WAV-/GLB-Export, ▶-Wiedergabe (`PlayWorker`) und Karten-Tab-Sprung. Klassifikation braucht den **vollen** Entry-Pfad `mount_point + "/" + rel` — das im Tree gespeicherte `rel` allein verliert pro Chunk Mount-Teile; `game_gpath` erkennt nur das Präfix `../../../PioneerGame/Content/` (Engine-Mounts → „fremd“).
 
 Export-Pipeline einer Karte (drei Schritte, auch in der GUI so verkettet):
 
@@ -56,7 +59,7 @@ Datenzugriff von unten nach oben: `iostore.py` (utoc-Index, Block-Tabelle, Kompr
 
 ## Nicht offensichtliche Konstanten und Konventionen
 
-- **`arcpak/game.py` hat Import-Seiteneffekte:** schon das Importieren mountet die IoStore-Container und füllt Modul-Globals `C` (Container), `GN` (Namen), `smap` (ScriptObjects), `sch` (usmap-Schema). Andere Module (`texture.py` …) tun `from . import game` und nutzen diese Globals. Der Pfad zu den Paks kommt aus `config.Config.load()` (`arcpak/settings.json`, gitignored; Steam-Pfad-Autodetect in `config.find_pak_dir()`).
+- **`arcpak/game.py` baut den Kontext erst bei Bedarf:** Importieren ist kostenlos; `containers()`, `global_names()`, `script_map()`, `schema()`, `templates()` mounten/parsen beim ersten Zugriff (Singletons in `_CACHE`, `reset_context()` verwirft sie). Die Modul-Attribute `C` (Container), `GN` (Namen), `smap` (ScriptObjects), `sch` (usmap-Schema) lösen über `__getattr__` (PEP 562) auf dieselben Singletons auf — `game.C` bleibt also gültig, ist aber erst beim Lesen teuer. Der Pfad zu den Paks kommt aus `config.Config.load()` (`arcpak/settings.json`, gitignored; Steam-Pfad-Autodetect in `config.find_pak_dir()`).
 - **Usmap: genau ein Dump mischen-verboten.** Schema-Quelle ist `$ARC_USMAP`, sonst `usmap/SDK_Mappings.usmap`. Das Mischen zweier usmap-Dateien verschiebt Schema-Indizes und macht alle Property-Reads kaputt. Nur gezielt via `USMAP_EXTRA` erweitern. Nach einem Spiel-Patch den Dump ersetzen.
 - **Unversioned Properties:** Pakete speichern nur Felder, die vom Archetyp abweichen; fehlende Werte werden über die Template-Kette (`Templates.fields` in `game.py`) aufgelöst. FReal = 8 bytes (double) wegen Large World Coordinates.
 - **Koordinaten-Invariante** (`gltf.py`, `mapglb.py`): UE cm, linkshändig, Z-up → glTF m, rechtshändig, Y-up als `(x, z, y) · 0.01`; das y/z-Swap flippt die Händigkeit, Triangle-Winding bleibt unverändert — gegen Referenz-Exporte verifiziert, nicht „verbessern“.

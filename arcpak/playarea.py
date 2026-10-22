@@ -29,33 +29,55 @@ BlockingVolumes ∪ NavMeshBoundsVolume (BuriedCity has BlockingVolumes only ins
 
 Output: out/map/<Name>_playarea.json (outline, carpet runs, volumes, PlayerStart, limiters);
 `python tools/mapexport.py glb` draws it / crops with it when the file exists.
+
+Importing this module has no side effects (no container is mounted, no command line is read).
+The API is run(); main() is the CLI entry point. A map without a play area raises NoPlayArea
+(exit code 3), which the callers turn into "export without cropping".
 """
-import sys, os, json, struct, collections, itertools, math
+import sys, os, json, struct, collections, math
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from . import game, iostore, mesh, uetransform as ut, zen
 from .config import report_progress
 
-FILTER = next(a for a in sys.argv[1:] if not a.startswith("--"))
-NAME = FILTER.strip("/").split("/")[-1]
-CELL = float(next((a[7:] for a in sys.argv if a.startswith("--cell=")), 100))
-STRIKT = "--strikt" in sys.argv          # do not extend boundary walls over their full height
-_h = next((a[7:] for a in sys.argv if a.startswith("--hang=")), "44.765")
-HANG = None if _h == "aus" else float(_h)
-SEED = next((tuple(map(float, a[7:].split(","))) for a in sys.argv if a.startswith("--seed=")), None)
-OUT = os.path.join(HERE, "out", "map", NAME + "_playarea.json")
 EXIT_KEIN_SPIELBEREICH = 3       # the GUI then skips this step and exports without cropping
+
+class NoPlayArea(SystemExit):
+    """No play area could be determined (exit code EXIT_KEIN_SPIELBEREICH). The caller (GUI,
+    `mapexport.py all` / `karte`) then exports without cropping."""
+
+    def __init__(self, grund):
+        super().__init__(EXIT_KEIN_SPIELBEREICH)
+        self.grund = grund
+
+# Run state, filled by run(); the functions below read these module globals. Importing this module
+# touches no container and no command line.
+FILTER = ""
+NAME = ""
+CELL = 100.0
+STRIKT = False                   # do not extend boundary walls over their full height
+HANG = 44.765                    # max walkable slope in degrees (None = off)
+SEED = None
+DUMP = None
+OUT = ""
+T = None                         # game.Templates(), set by run()
+cnt = collections.Counter()
+
+
+def reset():
+    """Fresh state for one run (the module stays reusable inside one process)."""
+    global T, cnt
+    T = game.templates()          # shared: packages stay parsed across steps
+    cnt = collections.Counter()
 
 
 def kein_spielbereich(grund):
     """No play area could be determined: remove any previous result (otherwise the GLB export would
-    crop with stale data) and exit with EXIT_KEIN_SPIELBEREICH."""
-    if os.path.exists(OUT):
+    crop with stale data) and signal NoPlayArea (exit code EXIT_KEIN_SPIELBEREICH)."""
+    if OUT and os.path.exists(OUT):
         os.remove(OUT)
     print(f"KEIN SPIELBEREICH: {grund}", flush=True)
-    sys.exit(EXIT_KEIN_SPIELBEREICH)
-T = game.Templates()
-cnt = collections.Counter()
+    raise NoPlayArea(grund)
 
 
 def cls_of(pkg, e):
@@ -140,7 +162,24 @@ def ref_export(pkg, v):
     return r[1] if isinstance(r, tuple) and r[0] == "export" and 0 <= r[1] < len(pkg.exports) else None
 
 
-def main():
+def run(filter_sub, out=None, cell=100.0, strikt=False, hang=44.765, seed=None, dump=None):
+    """Compute the play area of one map and write <out>. filter_sub: map sub-path, e.g.
+    'Maps/PracticeRangeArray/'. Raises NoPlayArea when the map has no play area.
+    Returns the output path."""
+    global FILTER, NAME, CELL, STRIKT, HANG, SEED, DUMP, OUT
+    FILTER = filter_sub
+    NAME = FILTER.strip("/").split("/")[-1]
+    CELL = float(cell)
+    STRIKT = bool(strikt)
+    HANG = None if hang in (None, "aus") else float(hang)
+    SEED = seed
+    DUMP = dump
+    OUT = out or os.path.join(HERE, "out", "map", NAME + "_playarea.json")
+    reset()
+    return _run()
+
+
+def _run():
     idx = iostore.path_index(game.C, exts=(".umap",))
     cells = sorted(p for p in idx if FILTER in p)
     vols, starts, limiters, terr = [], [], [], {}
@@ -329,7 +368,7 @@ def main():
                 reach[a, b] = True
                 stack.append((a, b))
     cnt["erreichbare Zellen"] = int(reach.sum())
-    dump = next((a[7:] for a in sys.argv if a.startswith("--dump=")), None)
+    dump = DUMP
     if dump:                                   # diagnostics: grid as npz
         np.savez_compressed(dump, reach=reach, blocked=blocked, G=G, x0=x0, y0=y0, cell=CELL)
     edge_touch = bool(reach[0, :].any() or reach[-1, :].any() or reach[:, 0].any() or reach[:, -1].any())
@@ -473,6 +512,32 @@ def main():
     for L in limiters:
         print("  PlayableAreaLimiter", L["export"], "looped", L["looped"], [[round(x) for x in q] for q in L["punkte"]])
     print("geschrieben:", OUT)
+    return OUT
+
+
+def parse_options(argv) -> dict:
+    """Command line -> run() keyword arguments."""
+    args = list(argv)
+    positional = [a for a in args if not a.startswith("--")]
+    if not positional:
+        raise SystemExit("playarea braucht einen Map-Pfad, z. B. Maps/PracticeRangeArray/")
+
+    def opt(name, default=None):
+        return next((a[len(name) + 1:] for a in args if a.startswith(name + "=")), default)
+
+    seed = opt("--seed")
+    hang = opt("--hang", "44.765")
+    return {"filter_sub": positional[0],
+            "out": opt("--out") or None,
+            "cell": float(opt("--cell", 100)),
+            "strikt": "--strikt" in args,
+            "hang": None if hang == "aus" else float(hang),
+            "seed": tuple(map(float, seed.split(","))) if seed else None,
+            "dump": opt("--dump") or None}
+
+
+def main(argv=None):
+    return run(**parse_options(sys.argv[1:] if argv is None else argv))
 
 
 if __name__ == "__main__":

@@ -19,16 +19,19 @@
 
 Steps: placements (all static-mesh placements of a map -> out/map/<Map>_placements.jsonl),
 playarea (walkable area -> out/map/<Map>_playarea.json; exit code 3 = the map has none),
-glb (GLB of the map -> out/map/<Map>.glb). `karte` runs the three steps in ONE process: mounting the
-containers, the usmap schema and the name tables cost about a second per process, and three separate
-steps pay that three times; it crops by default (no play area -> GLB without cropping, like `all`).
-`all` runs every map in turn, simplifies the result
-with Blender and writes one log per map to out/map/logs/. textures/audio are the browsable
-catalogues: PNG -> out/textures/, WAV + UEBA (.binka) -> out/audio/.
+glb (GLB of the map -> out/map/<Map>.glb). Each step is an importable library function
+(arcpak.<step>.run), so this dispatcher calls it in-process instead of re-running a module.
+
+`karte` runs the three steps in ONE process and is the recommended one-map command: mounting the
+containers, the usmap schema and the name tables cost about a second per process, and the parsed
+package/template caches are kept between steps on top of that. It crops by default
+(no play area -> GLB without cropping, like `all`).
+`all` runs every map in turn via `karte` (one process per map), simplifies the result with Blender
+and writes one log per map to out/map/logs/. textures/audio are the browsable catalogues:
+PNG -> out/textures/, WAV + UEBA (.binka) -> out/audio/.
 """
 import os
 import re
-import runpy
 import subprocess
 import sys
 import time
@@ -36,7 +39,6 @@ import time
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STEPS = {"placements": "arcpak.placements", "playarea": "arcpak.playarea", "glb": "arcpak.mapglb",
          "audio": "arcpak.audio", "textures": "arcpak.texture"}
-EXIT_NO_PLAYAREA = 3
 
 
 def map_list():
@@ -93,26 +95,15 @@ def export_all(argv):
         status, area = "ok", ""
         with open(os.path.join(logs, f"{name}.log"), "w", encoding="utf-8") as log:
             print(f"[{name}] P2 Platzierungen …", flush=True)
-            if run(log, "P2", [py, me, "placements", f"Maps/{name}/"]):
-                status = "FEHLER P2"
-            crop = False
-            if status == "ok" and crop_wanted:
-                print(f"[{name}] P2b Spielbereich …", flush=True)
-                rc = run(log, "P2b", [py, me, "playarea", f"Maps/{name}/"])
-                if rc == 0:
-                    import json
-                    crop = True
-                    with open(os.path.join(out_dir, f"{name}_playarea.json"), encoding="utf-8") as f:
-                        pa = json.load(f)
-                    area = f"{pa['flaeche_m2']:,.0f} m²" + ("" if pa.get("geschlossen", True) else " (Näherung)")
-                elif rc == EXIT_NO_PLAYAREA:
-                    area = "keiner → ohne Zuschnitt"
-                else:
-                    area = f"FEHLER P2b (exit {rc}) → ohne Zuschnitt"
-            if status == "ok":
-                print(f"[{name}] P3 GLB …", flush=True)
-                if run(log, "P3", [py, me, "glb", name] + (["--crop"] if crop else []) + filters):
-                    status = "FEHLER P3"
+            cmd = [py, me, "karte", name] + ([] if crop_wanted else ["--ohne-crop"]) + filters
+            rc = run(log, "karte (P2+P2b+P3)", cmd)
+            if rc:
+                status = "FEHLER karte"
+            if status == "ok" and os.path.exists(os.path.join(out_dir, f"{name}_playarea.json")):
+                import json
+                with open(os.path.join(out_dir, f"{name}_playarea.json"), encoding="utf-8") as f:
+                    pa = json.load(f)
+                area = f"{pa['flaeche_m2']:,.0f} m²" + ("" if pa.get("geschlossen", True) else " (Näherung)")
             if status == "ok" and simplify:
                 print(f"[{name}] Vereinfachen {ratio:.0%} …", flush=True)
                 if run(log, "Vereinfachen", [py, os.path.join(HERE, "tools", "blender_glb.py"), "simplify", glb,
@@ -135,15 +126,60 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows consoles default to cp1252
     except AttributeError:
         pass
-    if len(sys.argv) < 2 or sys.argv[1] not in (*STEPS, "all"):
+    if len(sys.argv) < 2 or sys.argv[1] not in (*STEPS, "all", "karte"):
         raise SystemExit(__doc__)
     cmd, rest = sys.argv[1], sys.argv[2:]
     sys.path.insert(0, HERE)
     if cmd == "all":
         export_all(rest)
         return
-    sys.argv = [f"mapexport {cmd}", *rest]
-    runpy.run_module(STEPS[cmd], run_name="__main__", alter_sys=True)
+    if cmd == "karte":
+        run_karte(rest)
+        return
+    # In-process dispatch: the step modules are importable libraries, so there is no second
+    # module instance and no runpy overhead.
+    import importlib
+    mod = importlib.import_module(STEPS[cmd])
+    mod.main(rest)               # output path; a no-play-area map raises SystemExit(3)
+
+
+def run_karte(argv):
+    """placements → playarea → glb in ONE process (see the module docstring)."""
+    from arcpak import mapglb, placements, playarea
+    args = list(argv)
+    positional = [a for a in args if not a.startswith("--")]
+    if not positional:
+        raise SystemExit("karte braucht einen Map-Namen oder Pfad, z. B. PracticeRangeArray")
+    name = positional[0].strip("/").split("/")[-1]
+    sub = positional[0] if "/" in positional[0] else f"Maps/{name}/"
+
+    def opt(key, default=None):
+        return next((a[len(key) + 1:] for a in args if a.startswith(key + "=")), default)
+
+    t0 = time.time()
+    if "--ohne-platzierungen" not in args:
+        print(f"[{name}] P2 Platzierungen …", flush=True)
+        placements.run(sub, opt("--placements"))
+    crop = "--ohne-crop" not in args
+    if crop:
+        print(f"[{name}] P2b Spielbereich …", flush=True)
+        seed = opt("--seed")
+        try:
+            playarea.run(sub, cell=float(opt("--cell", 100)), strikt="--strikt" in args,
+                         hang=opt("--hang", "44.765"),
+                         seed=tuple(map(float, seed.split(","))) if seed else None)
+        except playarea.NoPlayArea as e:
+            print(f"[{name}] kein Spielbereich ({e.grund}) → ohne Zuschnitt", flush=True)
+            crop = False
+    print(f"[{name}] P3 GLB …", flush=True)
+    out = mapglb.run(**mapglb.parse_options(
+        [name] + [a for a in args if a.startswith("--out=")]
+        + (["--crop"] if crop else [])
+        + [a for a in args if a in ("--spielbereich", "--volumes", "--ohne-terrain",
+                                    "--ohne-blaetter", "--ohne-effekte",
+                                    "--ohne-hilfsgeo", "--ohne-decals")]))
+    print(f"[{name}] fertig in {time.time() - t0:.0f} s", flush=True)
+    return out
 
 
 if __name__ == "__main__":

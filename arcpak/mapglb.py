@@ -38,27 +38,50 @@ Output: out/map/<map-name>.glb
 
 Accounting: every used placement maps to exactly one node; decoded meshes, nodes and
 vertex/triangle counts are tallied and printed so they can be checked against the Blender import.
+
+Importing this module has no side effects (no container is mounted, no command line is read).
+The API is run(); main() is the CLI entry point. Run state lives in the module globals below and is
+reset by run(), so one process can export several maps in a row (tools/mapexport.py karte).
 """
-import sys, os, json, struct, collections
+import sys, os, json, collections
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from . import game, gltf as gltf_mod, iostore, mesh, uetransform as ut, zen
 from .config import report_progress
 from .game import native_start
 
-NAME = next(a for a in sys.argv[1:] if not a.startswith("--"))
-SRC = next((a for a in sys.argv[1:] if a.endswith(".jsonl")),
-           os.path.join(HERE, "out", "map", NAME + "_placements.jsonl"))
-OUT = next((a[6:] for a in sys.argv if a.startswith("--out=")),
-           os.path.join(HERE, "out", "map", NAME + ".glb"))
-T = game.Templates()
+# Options (see run()); the CLI mapping lives in parse_options().
+
+NAME = ""                             # set by run(): map name (and default file stems)
+SRC = ""                              # placements JSONL
+OUT = ""                              # output GLB
+T = None                              # game.Templates(), set by run()
 cnt = collections.Counter()
 why = collections.Counter()
 
-umap_idx = iostore.path_index(game.C, exts=(".umap",))
-ubulk_idx = iostore.path_index(game.C, exts=(".ubulk",))
-bulks = collections.defaultdict(list)
-for p, cl in ubulk_idx.items():
-    bulks[game.stem_of(p)].extend(cl)
+umap_idx = {}                         # filled by run(): .umap path index
+ubulk_idx = {}                        # filled by run(): .ubulk path index
+bulks = collections.defaultdict(list)  # package stem -> [(container, entry id)], filled by run()
+
+def reset():
+    """Fresh state for one run (a process may export several maps in a row)."""
+    global T, cnt, why, glb, umap_idx, ubulk_idx, bulks, MESH_CACHE, GEO, GLTF, LOCAL, NUR_BLATT
+    global BLATT_MATS, EFFEKT_MESHES, HILFS_MESHES, DECAL_MESHES, REGION, REGION_EXTRA, REGION_SUM
+    T = game.templates()          # shared: packages stay parsed across steps
+    cnt, why = collections.Counter(), collections.Counter()
+    glb = gltf_mod.GlbBuilder()
+    MESH_CACHE, GEO, GLTF, LOCAL, NUR_BLATT = {}, {}, {}, {}, set()
+    BLATT_MATS = collections.Counter()
+    EFFEKT_MESHES = collections.Counter()
+    HILFS_MESHES = collections.Counter()
+    DECAL_MESHES = collections.Counter()
+    REGION = None
+    REGION_EXTRA = [None, None]
+    REGION_SUM = [None, None]
+    umap_idx = iostore.path_index(game.C, exts=(".umap",))
+    ubulk_idx = iostore.path_index(game.C, exts=(".ubulk",))
+    bulks = collections.defaultdict(list)
+    for p, cl in ubulk_idx.items():
+        bulks[game.stem_of(p)].extend(cl)
 
 
 def lod_data(lod, raw, m, blob):
@@ -95,21 +118,23 @@ def mesh_source(rm):
     return raw, pkg, pkg.exports[rm["export"]], game.stem_of(rm["local_cell"])
 
 
-glb = gltf_mod.GlbBuilder()
+glb = gltf_mod.GlbBuilder()           # replaced by reset()
 MESH_CACHE = {}                      # JSONL mesh key -> key (decoded) | None
 GEO = {}                             # JSONL mesh key -> (name, pos, idx, sections, nrm, uv, bounds, mats)
 GLTF = {}                            # JSONL mesh key -> glTF mesh index (created on first node)
 BLATT_MATS = collections.Counter()   # removed leaf materials (--ohne-blaetter)
-CROP = "--crop" in sys.argv
-SPIELBEREICH = "--spielbereich" in sys.argv
-VOLUMES = "--volumes" in sys.argv
-TERRAIN = "--ohne-terrain" not in sys.argv
-OHNE_BLAETTER = "--ohne-blaetter" in sys.argv
-OHNE_EFFEKTE = "--ohne-effekte" in sys.argv
+
+# Options, set by run() (see parse_options / the module docstring)
+CROP = False
+SPIELBEREICH = False
+VOLUMES = False
+TERRAIN = True
+OHNE_BLAETTER = False
+OHNE_EFFEKTE = False
 EFFEKT_PFAD = "/Game/Pioneer/Effects/"
+OHNE_HILFSGEO = False
+OHNE_DECALS = False
 EFFEKT_MESHES = collections.Counter()      # removed effect meshes (--ohne-effekte)
-OHNE_HILFSGEO = "--ohne-hilfsgeo" in sys.argv
-OHNE_DECALS = "--ohne-decals" in sys.argv
 HILFS_MESHES = collections.Counter()
 DECAL_MESHES = collections.Counter()
 
@@ -557,7 +582,23 @@ def landscapes():
         cnt["Terrain-Normale +Z"] += st["normale_+z"]
 
 
-def main():
+def run(name, src=None, out=None, crop=False, spielbereich=False, volumes=False, terrain=True,
+        ohne_blaetter=False, ohne_effekte=False, ohne_hilfsgeo=False, ohne_decals=False) -> str:
+    """Build the GLB of one map from its placements JSONL and return the output path.
+    Importing this module has no side effects; run() may be called repeatedly in one process."""
+    global NAME, SRC, OUT, CROP, SPIELBEREICH, VOLUMES, TERRAIN, OHNE_BLAETTER, OHNE_EFFEKTE
+    global OHNE_HILFSGEO, OHNE_DECALS
+    NAME = name
+    SRC = src or os.path.join(HERE, "out", "map", name + "_placements.jsonl")
+    OUT = out or os.path.join(HERE, "out", "map", name + ".glb")
+    CROP, SPIELBEREICH, VOLUMES = bool(crop), bool(spielbereich), bool(volumes)
+    TERRAIN, OHNE_BLAETTER, OHNE_EFFEKTE = bool(terrain), bool(ohne_blaetter), bool(ohne_effekte)
+    OHNE_HILFSGEO, OHNE_DECALS = bool(ohne_hilfsgeo), bool(ohne_decals)
+    reset()
+    _run()
+    return OUT
+
+def _run():
     global REGION
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     if CROP:
@@ -642,6 +683,27 @@ def main():
         for k, v in why.most_common(10):
             print(f"  {v:7,}  {k}")
 
+
+def parse_options(argv) -> dict:
+    """Command line -> run() keyword arguments."""
+    args = list(argv)
+    positional = [a for a in args if not a.startswith("--") and not a.endswith(".jsonl")]
+    if not positional:
+        raise SystemExit("glb braucht einen Map-Namen, z. B. PracticeRangeArray")
+    return {"name": positional[0],
+            "src": next((a for a in args if a.endswith(".jsonl")), None),
+            "out": next((a[6:] for a in args if a.startswith("--out=")), None),
+            "crop": "--crop" in args,
+            "spielbereich": "--spielbereich" in args,
+            "volumes": "--volumes" in args,
+            "terrain": "--ohne-terrain" not in args,
+            "ohne_blaetter": "--ohne-blaetter" in args,
+            "ohne_effekte": "--ohne-effekte" in args,
+            "ohne_hilfsgeo": "--ohne-hilfsgeo" in args,
+            "ohne_decals": "--ohne-decals" in args}
+
+def main(argv=None) -> str:
+    return run(**parse_options(sys.argv[1:] if argv is None else argv))
 
 if __name__ == "__main__":
     main()
