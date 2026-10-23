@@ -15,7 +15,8 @@
                                          [--mit-blaettern] [--mit-effekten] [--mit-hilfsgeo]
                                          [--mit-decals] [--ab=<Map>] [--neu]
     python tools/mapexport.py textures   list|info|export …   (own help: call `textures` bare)
-    python tools/mapexport.py audio      list|info|export …   (own help: call `audio` bare)
+    python tools/mapexport.py audio      list|info|export|play|ffmpeg …   (own help: call `audio` bare)
+    python tools/mapexport.py modelle    list|info|export …   (own help: call `modelle` bare)
 
 Steps: placements (all static-mesh placements of a map -> out/map/<Map>_placements.jsonl),
 playarea (walkable area -> out/map/<Map>_playarea.json; exit code 3 = the map has none),
@@ -28,7 +29,10 @@ package/template caches are kept between steps on top of that. It crops by defau
 (no play area -> GLB without cropping, like `all`).
 `all` runs every map in turn via `karte` (one process per map), simplifies the result with Blender
 and writes one log per map to out/map/logs/. textures/audio are the browsable catalogues:
-PNG -> out/textures/, WAV + UEBA (.binka) -> out/audio/.
+PNG -> out/textures/, WAV + UEBA (.binka) -> out/audio/. `audio play` listens to a sound right away
+(BinkA through an external FFmpeg — `audio ffmpeg` says which build on this machine can).
+`modelle` is the model catalogue of the Modelle tab from the command line: weapons, ARC enemies,
+gear and outfits, assembled and written as one GLB each to out/models/<category>/.
 """
 import os
 import re
@@ -38,7 +42,7 @@ import time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STEPS = {"placements": "arcpak.placements", "playarea": "arcpak.playarea", "glb": "arcpak.mapglb",
-         "audio": "arcpak.audio", "textures": "arcpak.texture"}
+         "audio": "arcpak.audio", "textures": "arcpak.texture", "modelle": "arcpak.models"}
 
 
 def map_list():

@@ -8,6 +8,8 @@ These tests fail if that ever comes back.
 """
 import ast
 import importlib
+import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -174,6 +176,131 @@ class TestPureHelpers(unittest.TestCase):
         self.assertAlmostEqual(flat[12], 1.0)
         self.assertAlmostEqual(flat[13], 3.0)
         self.assertAlmostEqual(flat[14], 2.0)
+
+
+class TestAudioLayer(unittest.TestCase):
+    """Guards for the sound path: the UEBA container layout, the sample check that decides whether
+    an FFmpeg build may produce a WAV, and the search for that build. None of these need game data."""
+
+    def test_audio_import_stays_cheap(self):
+        """arcpak.audio is imported by the GUI and by tests: it must not mount the containers."""
+        code = ("import arcpak.audio\nimport arcpak.game as g\n"
+                "assert g._CACHE == {}, g._CACHE\nprint('ok')\n")
+        r = _run_py(code)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ok", r.stdout)
+
+    def test_ueba_container_constants(self):
+        """The header the game's SoundWave decoder and FFmpeg's binka demuxer both expect. The u32
+        0x55454241 little-endian is b"ABEU" on disk — writing b"UEBA" instead makes the file unusable."""
+        import struct
+        from arcpak import audio
+        self.assertEqual(audio.UEBA_MAGIC, b"ABEU")
+        self.assertEqual(audio.UEBA_MAGIC, struct.pack("<I", 0x55454241))
+        self.assertEqual(audio.BLOCK_MAGIC, 0x9999)
+        self.assertEqual(audio.SEEK_MAGIC, b"SEEK")
+
+    @staticmethod
+    def _wav(pcm: bytes, width=2, rate=48000, ch=1) -> bytes:
+        import io
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(ch); w.setsampwidth(width); w.setframerate(rate)
+            w.writeframes(pcm)
+        return buf.getvalue()
+
+    def test_wav_quality_is_the_real_gatekeeper(self):
+        """ffmpeg_status() only trusts a build whose decoded samples look like audio: silence,
+        wrong bit width, wrong length and full-scale garbage must all be rejected, a tone accepted."""
+        import numpy as np
+        from arcpak import audio
+        tone = (np.sin(2 * np.pi * 1000 * np.arange(48000) / 48000) * 12000).astype("<i2").tobytes()
+        self.assertIsNone(audio._wav_quality(self._wav(tone), 48000))
+        self.assertIn("Stille", audio._wav_quality(self._wav(np.zeros(48000, "<i2").tobytes()), 48000))
+        self.assertIn("16-bit", audio._wav_quality(self._wav(tone, width=4), 48000))
+        self.assertIn("Länge", audio._wav_quality(self._wav(tone), 4 * 48000))
+        garbage = np.full(48000, 32700, dtype="<i2").tobytes()
+        self.assertIn("Vollausschlag", audio._wav_quality(self._wav(garbage), 48000))
+        self.assertIsNotNone(audio._wav_quality(b"kein WAV", 48000))
+
+    def test_ffmpeg_candidate_search(self):
+        """prefer first, duplicates dropped, folders expanded, non-executables ignored."""
+        import tempfile
+        from arcpak import audio
+        with tempfile.TemporaryDirectory() as td:
+            night = os.path.join(td, "bin", audio._exe("ffmpeg"))
+            os.makedirs(os.path.dirname(night))
+            with open(night, "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(night, 0o755)
+            broken = os.path.join(td, audio._exe("ffmpeg"))      # not executable
+            with open(broken, "w") as f:
+                f.write("kein Programm\n")
+            got = audio.ffmpeg_candidates(night)
+            self.assertEqual(got[0], os.path.realpath(night))    # the just typed path leads
+            self.assertNotIn(os.path.realpath(broken), got)
+            self.assertEqual(len(got), len(set(got)), "duplicates would mean probing twice")
+
+    def test_probe_cache_keyed_by_build(self):
+        """A replaced nightly build must not inherit the old verdict (mtime+size is the stamp)."""
+        import tempfile
+        from arcpak import audio
+        with tempfile.TemporaryDirectory() as td:
+            exe = os.path.join(td, audio._exe("ffmpeg"))
+            with open(exe, "w") as f:
+                f.write("v1")
+            os.chmod(exe, 0o755)
+            first = audio._stamp(exe)
+            self.assertNotEqual(first, "?")
+            with open(exe, "w") as f:
+                f.write("v2, longer content")
+            self.assertNotEqual(first, audio._stamp(exe))
+            self.assertEqual(audio._stamp(os.path.join(td, "missing")), "?")
+
+    @unittest.skipUnless(importlib.util.find_spec("PyQt6"), "the Audio tab needs PyQt6")
+    def test_gui_play_helpers(self):
+        """preview_path() keeps previews in one folder (repeat play overwrites instead of piling up)
+        and play_line() formats every placeholder — an unfilled {…} would show up in the window."""
+        sys.path.insert(0, str(HERE / "tools"))
+        from audio_tab import play_line, preview_path
+        a, b = preview_path("Grab_GuitarAcoustic_04"), preview_path("../../etc/passwd")
+        self.assertEqual(os.path.dirname(a), os.path.dirname(b))
+        self.assertTrue(a.endswith(".wav") and b.endswith(".wav"))
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, preview_path("Grab_GuitarAcoustic_04"))
+        for line in (play_line("/tmp/x.wav", "ffmpeg", {"dauer": 1.234, "rate": 48000, "kanal": 2,
+                                                       "peak": 0.51, "player": "ffplay"}),
+                     play_line("/tmp/x.wav", "pcm", {}),
+                     play_line("/tmp/x.wav", "pcm", {"player_error": "kein Audioausgang"})):
+            self.assertNotIn("{", line, line)
+        self.assertIn("ffplay", play_line("/tmp/x.wav", "ffmpeg", {"player": "ffplay"}))
+
+
+class TestTranslations(unittest.TestCase):
+    """tools/lang/*.json is keyed by the German source text: a language missing a key silently shows
+    German, and a {placeholder} lost in translation raises inside tr() while the tab is running."""
+
+    LANG_DIR = HERE / "tools" / "lang"
+
+    def _tables(self):
+        return {p.name: json.loads(p.read_text(encoding="utf-8")) for p in self.LANG_DIR.glob("*.json")}
+
+    def test_languages_agree_on_keys(self):
+        tables = self._tables()
+        self.assertGreater(len(tables), 1, "the language files disappeared")
+        reference = sorted(tables["en.json"])
+        for name, table in tables.items():
+            self.assertEqual(sorted(table), reference, f"{name} covers a different set of texts")
+
+    def test_placeholders_survive_translation(self):
+        import re
+        want = lambda s: sorted(set(re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)", s)))  # noqa: E731
+        for name, table in self._tables().items():
+            for key, value in table.items():
+                if isinstance(value, str):
+                    self.assertEqual(want(key), want(value),
+                                     f"{name}: {key[:50]!r} -> {value[:50]!r}")
 
 
 if __name__ == "__main__":

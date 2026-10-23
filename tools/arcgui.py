@@ -39,7 +39,7 @@ from arcpak.config import detached_kwargs, find_blender, open_folder, parse_prog
 from arcpak.iostore import mount_directory
 from arcpak.mapnames import map_names
 from i18n import LANGUAGES, set_language, tr
-from audio_tab import AudioTab, PlayWorker
+from audio_tab import AudioTab, PlayWorker, play_line
 from models_tab import ModelsTab
 from textures_tab import ImageWorker, TexturesTab
 
@@ -345,6 +345,7 @@ class FileInfoDialog(QDialog):
             self.btn_png.setVisible(True)
         elif kind == "klang":
             it = self.data["item"]
+            from arcpak import audio
             dauer = dauer_text(it.duration) if it.duration else tr("unbekannt")
             fmt = (tr("Roh-PCM (16-bit) → WAV") if it.pcm
                    else (tr("BinkA → UEBA-Container; ▶ dekodiert über FFmpeg") if it.ubulk
@@ -353,7 +354,21 @@ class FileInfoDialog(QDialog):
                          f"{dauer} · {it.rate or '?'} Hz · {it.channels or '?'} Kanäle · {fmt}")
             if it.ubulk:
                 self.btn_play.setVisible(True)
-                (self.btn_wav if it.pcm else self.btn_binka).setVisible(True)
+                self.btn_binka.setVisible(True)
+                self.btn_wav.setVisible(True)
+                if not it.pcm:
+                    self.btn_wav.setText(tr("Als WAV (FFmpeg)"))
+                    self.btn_wav.setToolTip(tr("dekodiert BinkA mit dem externen FFmpeg — kann das kein Build, "
+                                              "wird stattdessen der UEBA-Container (.binka) geschrieben"))
+                st = audio.ffmpeg_cached()
+                short = (st.get("version") or "?").split(" Copyright")[0].replace("ffmpeg version ", "")
+                if not st.get("exe"):
+                    lines.append(tr("FFmpeg: nicht gefunden — ▶ Anhören und WAV von BinkA brauchen FFmpeg"))
+                elif st.get("capable"):
+                    lines.append(tr("FFmpeg {v} hier dekodiert BinkA", v=short))
+                else:
+                    lines.append(tr("FFmpeg {v} hier dekodiert BinkA nicht — ▶ und WAV brauchen einen Build "
+                                    "von FFmpeg master seit 2026-09-25 (Pfad in den Einstellungen)", v=short))
         elif kind == "mesh":
             lines.append(f"<b>{self.data.get('mesh_class')}</b> <code>{gpath}</code>")
             lines.append(tr("Models mit Vorschau gibt es im Tab Modelle — hier geht der Weg direkt zum GLB."))
@@ -406,17 +421,14 @@ class FileInfoDialog(QDialog):
         self.play_worker.done.connect(self._play_done)
         self.play_worker.start()
 
-    def _play_done(self, path, err):
-        way = self.play_worker.way if self.play_worker else ""
+    def _play_done(self, path, err, way, info):
         self.btn_play.setEnabled(self.data.get("item") is not None)
         if err:
             self.step.setText(tr("Abspielen nicht möglich: {err}", err=err))
             return
-        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-        hint = tr("BinkA über FFmpeg dekodiert") if way == "ffmpeg" else tr("Roh-PCM")
-        self.step.setText(tr("WAV → {path} ({hint}) — {action}", path=os.path.basename(path), hint=hint,
-                             action=tr("der System-Player öffnet ihn") if opened
-                             else tr("den Player konnte man nicht automatisch öffnen — Datei manuell öffnen")))
+        if not (info or {}).get("player"):        # no ffplay/paplay here: ask the desktop handler
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        self.step.setText(play_line(path, way, info or {}))
 
     def _sound_export(self, kind):
         it = self.data.get("item")
@@ -425,14 +437,18 @@ class FileInfoDialog(QDialog):
         from arcpak import audio
         out = str(HERE / "out" / "audio")
         try:
-            if kind == "wav":
-                path = audio.export_wav(it, audio.out_path(it, ".wav", out))
+            if kind == "wav" and it.pcm:
+                path, ext = audio.export_wav(it, audio.out_path(it, ".wav", out)), "WAV"
+            elif kind == "wav":
+                path, how = audio.decode_wav(it, audio.out_path(it, ".wav", out))
+                ext = ("WAV" if how == "wav"
+                       else tr("UEBA, denn FFmpeg konnte nicht dekodieren") + f" ({how.split(': ', 1)[-1]})")
             else:
-                path = audio.export_binka(it, audio.out_path(it, ".binka", out))
+                path, ext = audio.export_binka(it, audio.out_path(it, ".binka", out)), "UEBA"
         except Exception as e:
             self.step.setText(tr("Export fehlgeschlagen: {err}", err=f"{type(e).__name__}: {e}"))
             return
-        self.step.setText(tr("{ext} geschrieben → {path}", ext=os.path.splitext(path)[1].lstrip(".").upper(),
+        self.step.setText(tr("{ext} geschrieben → {path}", ext=ext or os.path.splitext(path)[1].lstrip(".").upper(),
                              path=os.path.relpath(path, HERE)))
 
     # ---------- mesh ----------
@@ -1061,10 +1077,25 @@ class SettingsDialog(QDialog):
             self.lang.addItem(name, code)
         self.lang.setCurrentIndex(list(LANGUAGES).index(set_language(cfg.language)))
         self.lang_changed = False
+        self.ffmpeg = QLineEdit(cfg.ffmpeg)
+        self.ffmpeg.setPlaceholderText(tr("leer = automatisch suchen: ARC_FFMPEG, PATH, ~/.local/bin, "
+                                          "~/bin, tools/vendor …"))
+        self.btn_ffmpeg = QPushButton(tr("prüfen"))
+        self.btn_ffmpeg.setToolTip(tr("die gefundenen FFmpeg-Builds an einem echten Klang testen "
+                                      "(die Versionsnummer allein sagt über UEBA/BinkA nichts aus)"))
+        self.btn_ffmpeg.clicked.connect(self._probe_ffmpeg)
+        row = QHBoxLayout()
+        row.addWidget(self.ffmpeg, 1); row.addWidget(self.btn_ffmpeg)
         form.addRow(tr("Paks-Ordner"), self.pak)
         form.addRow(tr("Ausgabeordner"), self.out)
         form.addRow(tr("Sprache"), self.lang)
+        form.addRow(tr("FFmpeg (BinkA)"), row)
         lay.addLayout(form)
+        self.ffmpeg_status = QLabel(tr("FFmpeg wird zum Abspielen und für WAV-Export von BinkA gebraucht; "
+                                       "oben auf „prüfen“ testet die Builds."))
+        self.ffmpeg_status.setWordWrap(True)
+        self.ffmpeg_status.setStyleSheet("color: #9aa0a6;")
+        lay.addWidget(self.ffmpeg_status)
         lay.addWidget(QLabel(tr("AES-Keys (ohne GUID = allgemein; nach Spiel-Patches aktualisieren):")))
         self.keys = QTableWidget(len(cfg.aes_keys), 2)
         self.keys.setHorizontalHeaderLabels([tr("Name"), tr("Key (hex, ohne 0x)")])
@@ -1080,9 +1111,34 @@ class SettingsDialog(QDialog):
         btns.addWidget(add); btns.addWidget(rem); btns.addStretch(); btns.addWidget(save)
         lay.addLayout(btns)
 
+    def _probe_ffmpeg(self):
+        """Test every found FFmpeg build against a real sound and show the result (the setting is
+        applied first, so a freshly typed path is part of the search)."""
+        from arcpak import audio
+        self.cfg.ffmpeg = self.ffmpeg.text().strip()
+        self.btn_ffmpeg.setEnabled(False)
+        self.ffmpeg_status.setText(tr("prüfe die gefundenen FFmpeg-Builds an einem echten Klang …"))
+        QApplication.processEvents()                    # ~1 s per build, decodes one sound
+        try:
+            st = audio.ffmpeg_status(refresh=True, prefer=self.cfg.ffmpeg)
+        except Exception as e:
+            self.ffmpeg_status.setText(f"{type(e).__name__}: {e}")
+        else:
+            lines = [tr("{exe} → {r}", exe=exe, r=tr("kann BinkA") if ok else tr("kann BinkA nicht"))
+                     for exe, ok in st.get("tried", [])]
+            head = (tr("benutzt: {v} — {k}", v=st.get("version") or "?",
+                       k=tr("kann BinkA dekodieren") if st.get("capable") else st.get("hint") or "")
+                    if st.get("exe") else tr("kein FFmpeg gefunden"))
+            typed = os.path.realpath(os.path.expanduser(self.cfg.ffmpeg)) if self.cfg.ffmpeg else ""
+            if typed and typed not in [os.path.realpath(x) for x in st.get("candidates", [])]:
+                head += f"\n{self.cfg.ffmpeg} → " + tr("kein FFmpeg gefunden")
+            self.ffmpeg_status.setText("\n".join([head] + lines))
+        self.btn_ffmpeg.setEnabled(True)
+
     def accept(self):
         self.cfg.pak_dir = self.pak.text()
         self.cfg.output_dir = self.out.text()
+        self.cfg.ffmpeg = self.ffmpeg.text().strip()
         code = self.lang.currentData()
         self.lang_changed = code != set_language(self.cfg.language)
         self.cfg.language = code
@@ -1108,7 +1164,8 @@ if __name__ == "__main__":
             win.search.setText(sys.argv[2])
         app.processEvents()
         shot = win.grab()
-        out = Path(__file__).parent / "tmp_arcgui.png"
+        out = HERE / "out" / "tmp_arcgui.png"      # out/ is gitignored: the screenshot must not land in tools/
+        out.parent.mkdir(parents=True, exist_ok=True)
         shot.save(str(out))
         print(f"selftest OK — {len(win.containers)} containers mounted, screenshot → {out}")
         sys.exit(0)

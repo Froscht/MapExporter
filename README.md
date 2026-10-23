@@ -78,9 +78,19 @@ Two formats live in the game data:
   (`.binka`) — with correct header and seek table, playable in Unreal. The "unmodified .ubulk"
   checkbox also copies the raw sound file as-is.
 
-The **▶ Play** button plays the selected sound: raw PCM immediately as WAV; BinkA is decoded via
-**external FFmpeg**, whose `binka` demuxer reads UEBA from **version 8.1** — without a suitable
-FFmpeg the GUI says so openly and the .binka route remains.
+The **▶ Play** button plays the selected sound: raw PCM immediately as WAV; BinkA is decoded by an
+**external FFmpeg**. Which build can do that is *not* written in any version number: every released
+FFmpeg (6.1 … 8.0.1) has a `binka` demuxer that only knows the old 1FCB layout and never sets the
+BA2 extradata ARC's blocks need — it happily returns full-scale garbage of the correct length. What
+works is a build from the FFmpeg master branch after the 2026-09-25 commit (verified with
+N-127941 / 2026-10-22). MapExporter therefore does not ask the version string: `audio ffmpeg` (and
+the Audio tab at startup) probes every found build with a real sound, checks the decoded samples and
+remembers the verdict per build in `cache/ffmpeg_probe.json`. To get a capable build: compile git
+master, or download a master snapshot (BtbN's `ffmpeg-master-*-gpl` archives, or the snapshot builds
+linked from ffmpeg.org). MapExporter finds it through `ARC_FFMPEG=/path/to/ffmpeg`, the **FFmpeg**
+field in the settings dialog (a file *or* a folder), `PATH`, `~/.local/bin`,
+`~/bin/ffmpeg-master-latest-linux64-gpl/bin/` or `tools/vendor/`. Without a capable build the GUI
+says so openly and the .binka route remains — the sound is not lost, only not playable here.
 
 SoundCues, attenuations and curves contain no sound data (names only) — hidden by default
 ("Show meta assets").
@@ -154,8 +164,16 @@ python tools/mapexport.py textures list  --filter=Rock
 python tools/mapexport.py textures export T_RockChip_01_C --max=1024    # -> out/textures/
 python tools/mapexport.py audio  list
 python tools/mapexport.py audio  export Weapon_Mechanic_17_Var_01       # WAV or .binka -> out/audio/
-python tools/mapexport.py audio  export Grab_GuitarAcoustic_04 --wav    # BinkA attempt via FFmpeg (>= 8.1), else .binka
+python tools/mapexport.py audio  export Grab_GuitarAcoustic_04 --wav    # BinkA via external FFmpeg, else .binka
 python tools/mapexport.py audio  export --alle --raw                    # all .ubulk unmodified
+python tools/mapexport.py audio  play  Grab_GuitarAcoustic_04           # decode and listen right away (~1 s)
+python tools/mapexport.py audio  ffmpeg --alle                          # which FFmpeg here decodes BinkA
+
+python tools/mapexport.py modelle list --kategorie=waffe                # the Modelle tab from the CLI
+python tools/mapexport.py modelle export BullCrab_01                    # -> out/models/<category>/
+
+python tools/test_library_contract.py                                   # guards, no game data needed
+python tools/_i18n_check.py                                             # missing translations, bad {placeholders}
 
 python tools/mapexport.py all        # all maps one after another, logs under out/map/logs/
 ```
@@ -168,7 +186,9 @@ python tools/mapexport.py all        # all maps one after another, logs under ou
 |---|---|
 | `start.bat`, `start.sh` | launchers Windows / Linux |
 | `tools/arcgui.py`, `tools/models_tab.py`, `tools/audio_tab.py`, `tools/textures_tab.py` | GUI (browser, map export, models, audio, textures, inventory) |
-| `tools/mapexport.py` | command line: placements, playarea, glb, audio, textures, all |
+| `tools/mapexport.py` | command line: placements, playarea, glb, karte, audio, textures, modelle, all |
+| `tools/test_library_contract.py` | regression guards that run without game data |
+| `tools/_i18n_check.py` | translation lint for `tools/lang/` |
 | `tools/blender_glb.py` | Blender: simplify polygons, open GLB |
 | `tools/i18n.py`, `tools/lang/` | GUI translations |
 | `arcpak/iostore.py`, `pakfile.py`, `crypto.py` | reading containers (IoStore, classic paks, Theia decryption) |

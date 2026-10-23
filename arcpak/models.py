@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
 
 from . import game, gltf, iostore, mesh, zen
 from . import uetransform as ut
+from .config import report_progress
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(HERE, "out", "models")
@@ -690,6 +692,143 @@ def export_glb(meshes: list[MeshData], path: str, rigged: bool = True, clips=Non
     return path
 
 
-def out_path(item: Item) -> str:
+def out_path(item: Item, base: str = OUT_DIR) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", item.name).strip("_")
-    return os.path.join(OUT_DIR, item.category, safe + ".glb")
+    return os.path.join(base, item.category, safe + ".glb")
+
+
+# ---------- command line ----------------------------------------------------------------------
+HELP = """modelle – Modell-Katalog und GLB-Export (dasselbe wie der Modelle-Tab der GUI)
+
+    python tools/mapexport.py modelle list  [--filter=NAME] [--kategorie=waffen|bots|gear|characters]
+    python tools/mapexport.py modelle info  NAME [--ohne-body] [--face=NAME]
+    python tools/mapexport.py modelle export NAME [NAME …] [--alle] [--out=ORDNER]
+                                            [--ohne-texturen] [--ohne-anim] [--ohne-body]
+                                            [--face=NAME] [--max=2048]
+    python tools/mapexport.py modelle gesichter
+
+Der Katalog kommt aus den Paketnamen: Waffen (DA_WeaponVisuals_…), Bots, Ausrüstung (Rucksäcke,
+Werkzeug, Rüstungen) und Outfits (DA_OI_Outfit_…). export setzt ein Modell genauso zusammen wie
+die GUI — Outfit-Teile am Grundkörper, Waffenteile an Socket oder Knochen des Schafts — und
+schreibt ein GLB pro Modell nach out/models/<kategorie>/<name>.glb, mit eingebetteten
+Farbtexturen (--ohne-texturen aus) und den Skelett-Animationen (--ohne-anim aus, sonst langsam).
+--face hängt den Kopf dazu, --ohne-body lässt Rumpf/Beine weg (nur die Outfit-Teile).
+"""
+
+
+def find(name: str, cat: dict[str, list[Item]] | None = None) -> list[Item]:
+    """Catalogue items matching a name: exact first, then substring, case-insensitive."""
+    cat = catalogue() if cat is None else cat
+    pool = [it for group in cat.values() for it in group]
+    n = name.lower()
+    return [it for it in pool if it.name.lower() == n] or [it for it in pool if n in it.name.lower()]
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        raise SystemExit(HELP)
+    cmd, rest = argv[0], argv[1:]
+    flags = [a for a in rest if a.startswith("--")]
+    words = [a for a in rest if not a.startswith("--")]
+
+    def opt(name, default=None):
+        return next((a[len(name) + 1:] for a in flags if a.startswith(name)), default)
+
+    if cmd not in ("list", "info", "export", "gesichter"):
+        raise SystemExit(HELP)
+    import time
+    t0 = time.time()
+    if cmd == "gesichter":
+        print("\n".join(faces()))
+        return
+
+    cat = catalogue()
+    flt = (opt("--filter") or "").lower()
+    if flt:
+        cat = {c: [it for it in v if flt in it.name.lower() or flt in (it.folder or "").lower()]
+               for c, v in cat.items()}
+    if (k := opt("--kategorie")):
+        k = {"waffen": "weapons", "ausruestung": "gear", "ausrüstung": "gear", "outfits": "characters",
+             "charaktere": "characters"}.get(k.lower(), k.lower())
+        if k not in CATEGORIES:
+            raise SystemExit(f"unbekannte Kategorie '{opt('--kategorie')}' — "
+                             f"möglich: {', '.join(CATEGORIES)} (waffen/ausruestung/outfits)")
+        cat = {c: (v if c == k else []) for c, v in cat.items()}
+
+    if cmd == "list":
+        n = sum(len(v) for v in cat.values())
+        print(f"{n} Modelle ({time.time() - t0:.0f} s), Suche '{flt or '—'}'")
+        for c in CATEGORIES:
+            if not cat[c]:
+                continue
+            print(f"\n{c}  ({len(cat[c])})")
+            for it in cat[c]:
+                print(f"   {it.name:42} {it.folder or '':22} {it.key}")
+        return
+
+    if cmd == "info":
+        if not words:
+            raise SystemExit("info braucht einen Modell-Namen")
+        hits = find(words[0], cat)
+        if not hits:
+            raise SystemExit(f"kein Modell '{words[0]}' — modelle list zeigt den Katalog")
+        if len(hits) > 1:
+            print("Treffer:", ", ".join(f"{it.category}/{it.name}" for it in hits[:20]))
+        it = hits[0]
+        body = "--ohne-body" not in flags
+        face = opt("--face")
+        import json
+        print(json.dumps({"name": it.name, "kategorie": it.category, "ordner": it.folder,
+                          "asset": it.key,
+                          "meshes": item_meshes(it, body=body, face=face),
+                          "gesichter": faces() if it.category == "characters" else [],
+                          "clips": [g.rsplit("/", 1)[-1] for g in item_clips(it)]},
+                         ensure_ascii=False, indent=1))
+        return
+
+    names = [w.lower() for w in words]
+    if not names or "alle" in names:
+        todo = [it for group in cat.values() for it in group]
+    else:
+        todo, seen = [], set()
+        for want in names:
+            for it in find(want, cat):
+                if (it.category, it.key) not in seen:
+                    seen.add((it.category, it.key))
+                    todo.append(it)
+    out_dir, max_size = opt("--out") or OUT_DIR, int(opt("--max") or 2048)
+    want_tex, want_anim, body, face = ("--ohne-texturen" not in flags, "--ohne-anim" not in flags,
+                                       "--ohne-body" not in flags, opt("--face"))
+    print(f"{len(todo)} Modelle ({', '.join(sorted({it.category for it in todo}))}) — "
+          f"Texturen {'an' if want_tex else 'aus'}, Animationen {'an' if want_anim else 'aus'}")
+    done = fails = 0
+    total = 0
+    for n, it in enumerate(todo):
+        try:
+            meshes, warns = build(it, body=body, face=face)
+            if want_tex:
+                warns += apply_textures(meshes, max_size)
+            clips = []
+            if want_anim:
+                clips, warn = load_clips(it, meshes)
+                warns += warn
+            if not meshes:
+                raise RuntimeError("kein Mesh geladen")
+            path = out_path(it, out_dir)
+            export_glb(meshes, path, clips=clips or None)
+            done += 1
+            total += os.path.getsize(path)
+            tris = sum(m.triangles for m in meshes)
+            print(f"  {it.category}/{it.name}: {len(meshes)} Meshes, {tris} Dreiecke, "
+                  f"{len(clips)} Clips → {path}")
+            for w in warns[:6]:
+                print(f"     Warnung: {w}")
+        except Exception as e:
+            fails += 1
+            print(f"  FEHLER {it.category}/{it.name}: {type(e).__name__}: {e}")
+        if n % 20 == 19:
+            report_progress(n + 1, len(todo))
+    report_progress(len(todo), len(todo))
+    print(f"{done} exportiert ({total / 1e6:.1f} MB) nach {out_dir}, {fails} Fehler, "
+          f"{time.time() - t0:.0f} s")

@@ -1,6 +1,7 @@
 """Settings (arcpak/settings.json), platform helpers and tool progress reporting.
 
-Update the AES keys in the settings when the game patches them, no code changes needed.
+Update the AES keys and the FFmpeg path in the settings when the game patches them or you install
+another FFmpeg build, no code changes needed.
 """
 import glob
 import json
@@ -114,6 +115,7 @@ DEFAULT_CONFIG = {
     "language": "",
     "output_dir": "extracted",
     "oodle_lib": "",
+    "ffmpeg": "",                               # path to an ffmpeg binary/folder that decodes UEBA
     "aes_keys": [
         {
             "name": "Arc Raiders AES key (2026-06)",
@@ -132,6 +134,7 @@ class Config:
     language: str = ""          # GUI language ("" = system language)
     output_dir: str = "extracted"
     oodle_lib: str = ""
+    ffmpeg: str = ""        # FFmpeg build for BinkA playback ("" = search $ARC_FFMPEG/PATH/etc.)
     aes_keys: list = field(default_factory=lambda: [dict(k) for k in DEFAULT_CONFIG["aes_keys"]])
 
     @classmethod
@@ -139,13 +142,15 @@ class Config:
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
             return cls(**{k: data.get(k, getattr(cls(), k, None)) for k in
-                          ("pak_dir", "game", "language", "output_dir", "oodle_lib", "aes_keys")})
+                          ("pak_dir", "game", "language", "output_dir", "oodle_lib", "ffmpeg",
+                           "aes_keys")})
         return cls()
 
     def save(self, path: Path = DEFAULT_CONFIG_PATH):
         path.write_text(json.dumps({
-            "pak_dir": self.pak_dir, "game": self.game, "language": self.language, "output_dir": self.output_dir,
-            "oodle_lib": self.oodle_lib, "aes_keys": self.aes_keys, "note": DEFAULT_CONFIG["note"],
+            "pak_dir": self.pak_dir, "game": self.game, "language": self.language,
+            "output_dir": self.output_dir, "oodle_lib": self.oodle_lib, "ffmpeg": self.ffmpeg,
+            "aes_keys": self.aes_keys, "note": DEFAULT_CONFIG["note"],
         }, indent=2), encoding="utf-8")
 
 
