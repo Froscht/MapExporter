@@ -16,6 +16,7 @@ from pathlib import Path
 
 from Crypto.Cipher import AES
 
+from .config import APP_DIR
 from .crypto import TheiaDecryptor
 
 
@@ -150,7 +151,7 @@ def ecb_decrypt(key, data):
 # Parsed container tables are cached on disk (cache/utoc_<name>_<fp>.pkl) keyed by the .utoc's
 # mtime_ns+size: mounting 36 containers costs ~1 s in pure Python, loading the pickles ~0.3 s.
 # A changed .utoc produces a new fingerprint and the stale cache file for that container is removed.
-_CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
+_CACHE_DIR = APP_DIR / "cache"
 _TABLE_ATTRS = ("version", "nchunks", "nblocks", "block_entry_size", "nmethods",
                 "method_name_length", "cbsize", "dir_size", "npartitions", "container_id",
                 "chunk_offsets", "flags", "container_guid", "partition_size",

@@ -35,7 +35,8 @@ The API is run(); main() is the CLI entry point. A map without a play area raise
 (exit code 3), which the callers turn into "export without cropping".
 """
 import sys, os, json, struct, collections, math
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from .config import APP_DIR
+HERE = str(APP_DIR)            # writable root (repo, or the folder of MapExporter.exe)
 import numpy as np
 from . import game, iostore, mesh, uetransform as ut, zen
 from .config import report_progress

@@ -93,7 +93,13 @@ GAME_KEYS = {
 
 def _load_kernel():
     """Try to load the compiled keystream kernel; compile it if missing."""
-    here = Path(__file__).parent
+    # In the Nuitka build the DLL is bundled under RES_DIR/arcpak (same relative path as the source
+    # tree); __file__ would point into the compiled module, so resolve via RES_DIR when available.
+    try:
+        from .config import RES_DIR
+        here = RES_DIR / "arcpak"
+    except ImportError:
+        here = Path(__file__).parent
     win = sys.platform == "win32"
     so = here / ("theia_kern.dll" if win else "theia_kern.so")
     src = here / "theia.c"

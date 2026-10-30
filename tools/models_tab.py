@@ -12,9 +12,10 @@ from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QSlider,
                              QListWidgetItem, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget)
 
+from arcpak.config import APP_DIR
 from i18n import tr
 
-HERE = Path(__file__).resolve().parent.parent
+HERE = APP_DIR                      # writable root (repo, or the folder of MapExporter.exe)
 
 try:                                    # optional: 3D preview
     import numpy as np

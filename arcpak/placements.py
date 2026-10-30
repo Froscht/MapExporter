@@ -39,10 +39,10 @@ from dataclasses import dataclass
 from . import game, iostore, mesh
 from . import uetransform as ut
 from . import zen
-from .config import report_progress
+from .config import APP_DIR, report_progress
 from .game import chain_names, native_start
 
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = str(APP_DIR)            # writable root (repo, or the folder of MapExporter.exe)
 
 @dataclass
 class Options:

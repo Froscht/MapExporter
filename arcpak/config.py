@@ -15,6 +15,33 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+# ---------- app roots ----------
+# The release build is a Nuitka onefile MapExporter.exe (see build_release.py): the source tree is
+# compiled to native code, so there is no .pyc bytecode to extract. Nuitka does not set sys.frozen;
+# it defines __compiled__ in every compiled module and unpacks the onefile payload to a fresh temp
+# dir per start. PyInstaller (sys.frozen + sys._MEIPASS) is still handled as a fallback.
+_NUITKA = "__compiled__" in globals()
+FROZEN = _NUITKA or bool(getattr(sys, "frozen", False))
+
+# RES_DIR: root of the read-only bundled tree (usmap/, tools/lang/, tools/blender_glb.py, the DLL).
+# This module is always <root>/arcpak/config.py and Nuitka keeps that layout in the unpack dir, so
+# parent.parent is the repo root in source mode and the unpack root when compiled — same relatives.
+RES_DIR = Path(__file__).resolve().parent.parent
+
+# APP_DIR: writable root for out/, cache/, extracted/ and settings.json. Never the unpack dir (a
+# onefile start throws it away); it is the folder that holds the real .exe the user launched.
+if _NUITKA:
+    APP_DIR = Path(globals()["__compiled__"].original_argv0).resolve().parent
+elif getattr(sys, "frozen", False):                 # PyInstaller fallback
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    APP_DIR = Path(__file__).resolve().parent.parent
+
+# Script Blender runs (`blender --python …`); it must exist as a real .py file on disk, so it is
+# shipped as bundled data (Blender runs it with its own Python, not our compiled code).
+BLENDER_SCRIPT = RES_DIR / "tools" / "blender_glb.py"
+
+
 # ---------- platform helpers ----------
 WINDOWS = sys.platform == "win32"
 PAKS_REL = Path("steamapps/common/Arc Raiders/PioneerGame/Content/Paks")
@@ -107,7 +134,7 @@ def detached_kwargs() -> dict:
 
 
 # ---------- settings ----------
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "settings.json"
+DEFAULT_CONFIG_PATH = APP_DIR / "settings.json" if FROZEN else APP_DIR / "arcpak" / "settings.json"
 
 DEFAULT_CONFIG = {
     "pak_dir": find_pak_dir(),

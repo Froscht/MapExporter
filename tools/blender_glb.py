@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""Blender helpers for map GLBs: simplify polygons, open a GLB in Blender.
-
-    python tools/blender_glb.py simplify <in.glb> <out.glb> [ratio=0.5] [min_tris=300]
-    python tools/blender_glb.py open <file.glb> [focus words ...]
+"""Blender helpers for map GLBs: simplify polygons, open a GLB in Blender. Usage text is in USAGE
+below, not this docstring, so it survives a --python-flag=no_docstrings release build.
 
 The same file runs inside Blender (`blender ... --python tools/blender_glb.py -- <mode> ...`):
 there it does the actual work; outside Blender it prepares the data and starts Blender.
@@ -25,9 +23,23 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The file Blender runs with its own Python. Two cases: (1) Blender executed THIS real .py from disk
+# -> __file__ is already the right path; (2) imported inside the compiled exe to dispatch simplify
+# -> point Blender at the bundled copy (arcpak.config.BLENDER_SCRIPT), never at the compiled module.
+if "__compiled__" in dir() or getattr(sys, "frozen", False):
+    from arcpak.config import BLENDER_SCRIPT
+    SCRIPT = str(BLENDER_SCRIPT)
+else:
+    SCRIPT = os.path.abspath(__file__)
 PROGRESS = "@@PROGRESS"          # same prefix as arcpak.config.report_progress
 # objects never decimated: play-area markers drawn by the exporter
 SKIP_NAMES = ("Spielbereich", "BlockingVolume", "PlayableAreaLimiter")
+
+USAGE = """Blender helpers for map GLBs: simplify polygons, open a GLB in Blender.
+
+    python tools/blender_glb.py simplify <in.glb> <out.glb> [ratio=0.5] [min_tris=300]
+    python tools/blender_glb.py open <file.glb> [focus words ...]
+"""
 
 
 # ---------- inside Blender ------------------------------------------------------------
@@ -264,7 +276,7 @@ def simplify(src, dst, ratio="0.5", min_tris="300"):
     print(f"Vorrat: {len(meshes)} Meshes statt {len(js['nodes'])} Knoten ({time.time() - t0:.1f}s)", flush=True)
 
     # stream Blender's output so its progress lines reach the GUI
-    proc = subprocess.Popen([find_blender(), "--background", "--python", os.path.abspath(__file__),
+    proc = subprocess.Popen([find_blender(), "--background", "--python", SCRIPT,
                              "--", "simplify", p_pool, p_dec, ratio, min_tris],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace")
@@ -367,7 +379,7 @@ def simplify(src, dst, ratio="0.5", min_tris="300"):
 def open_in_blender(glb, keys):
     sys.path.insert(0, HERE)
     from arcpak.config import detached_kwargs
-    subprocess.Popen([find_blender(), "--python", os.path.abspath(__file__), "--", "open", glb, *keys],
+    subprocess.Popen([find_blender(), "--python", SCRIPT, "--", "open", glb, *keys],
                      cwd=HERE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detached_kwargs())
     print(f"Blender gestartet: {glb}")
 
@@ -388,7 +400,7 @@ def main():
         return
     args = sys.argv[1:]
     if not args or args[0] not in ("simplify", "open"):
-        raise SystemExit(__doc__)
+        raise SystemExit(USAGE)
     if args[0] == "simplify":
         simplify(*args[1:5])
     else:

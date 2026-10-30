@@ -22,8 +22,11 @@ import subprocess
 import time
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from arcpak.config import APP_DIR, BLENDER_SCRIPT
+
+HERE = APP_DIR                      # writable root (repo, or the folder of MapExporter.exe)
 
 from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont, QPixmap
@@ -915,7 +918,7 @@ class MainWindow(QMainWindow):
                           [py, "tools/blender_glb.py", "simplify",
                            str(glb), str(self.out_glb(name)), f"{self.opt_ratio.value():.3f}"]))
         if self.opt_blender.isChecked():
-            steps.append((tr("Blender öffnen"), [find_blender(), "--python", "tools/blender_glb.py", "--", "open",
+            steps.append((tr("Blender öffnen"), [find_blender(), "--python", str(BLENDER_SCRIPT), "--", "open",
                                              str(self.out_glb(name))]))
         return steps
 
@@ -990,7 +993,7 @@ class MainWindow(QMainWindow):
         if not g.exists():
             QMessageBox.information(self, tr("Karten"), tr("Noch kein GLB — erst exportieren."))
             return
-        subprocess.Popen([find_blender(), "--python", "tools/blender_glb.py", "--", "open", str(g)], cwd=str(HERE),
+        subprocess.Popen([find_blender(), "--python", str(BLENDER_SCRIPT), "--", "open", str(g)], cwd=str(HERE),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detached_kwargs())
         self.map_log.appendPlainText(tr("Blender gestartet: {path}", path=g))
 
@@ -1150,7 +1153,7 @@ class SettingsDialog(QDialog):
         super().accept()
 
 
-if __name__ == "__main__":
+def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows consoles default to cp1252
     except AttributeError:
@@ -1170,3 +1173,7 @@ if __name__ == "__main__":
         print(f"selftest OK — {len(win.containers)} containers mounted, screenshot → {out}")
         sys.exit(0)
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

@@ -8,9 +8,10 @@ from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                              QListWidgetItem, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget)
 
+from arcpak.config import APP_DIR
 from i18n import tr
 
-HERE = Path(__file__).resolve().parent.parent
+HERE = APP_DIR                      # writable root (repo, or the folder of MapExporter.exe)
 MIPS = (256, 512, 1024, 2048, 4096)
 LIST_MAX = 3000                     # 14 000 rows make the list sluggish; filtering shows the rest
 

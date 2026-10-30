@@ -7,7 +7,14 @@ New language: copy lang/en.json, translate it, add code + name to LANGUAGES belo
 import json
 from pathlib import Path
 
-LANG_DIR = Path(__file__).resolve().parent / "lang"
+# Route through RES_DIR so source and the Nuitka build share one relative layout (tools/lang):
+# compiled, i18n is a top-level module whose __file__ no longer sits under tools/. Fall back to the
+# path next to this file when arcpak is not importable (e.g. tools/_i18n_check.py run standalone).
+try:
+    from arcpak.config import RES_DIR
+    LANG_DIR = RES_DIR / "tools" / "lang"
+except ImportError:
+    LANG_DIR = Path(__file__).resolve().parent / "lang"
 
 LANGUAGES = {            # code -> name in its own language
     "de": "Deutsch",

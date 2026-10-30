@@ -15,9 +15,10 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                              QMessageBox, QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget)
 
+from arcpak.config import APP_DIR
 from i18n import tr
 
-HERE = Path(__file__).resolve().parent.parent
+HERE = APP_DIR                      # writable root (repo, or the folder of MapExporter.exe)
 LIST_MAX = 4000                     # 55 000 rows make the list sluggish; filtering shows the rest
 
 

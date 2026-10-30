@@ -20,17 +20,21 @@ import re
 import struct
 
 from . import iostore, usmap, zen
+from .config import APP_DIR, RES_DIR
 from .globaldata import PAKS_DEFAULT, load_global_names, load_script_map
 from .mesh import Walk
 from .usmap import Property
 
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = str(APP_DIR)            # writable root (repo, or the folder of MapExporter.exe)
 
 # ---------- schema ------------------------------------------------------------
 # Source: $ARC_USMAP, otherwise usmap/SDK_Mappings.usmap. Use a single dump: mixing usmap files
 # changes per-class property counts and shifts every schema index after the first difference.
 # Extra files only on purpose via USMAP_EXTRA="a.usmap:b.usmap".
-USMAP = os.environ.get("ARC_USMAP") or os.path.join(HERE, "usmap", "SDK_Mappings.usmap")
+USMAP = os.environ.get("ARC_USMAP") or next(
+    (p for p in (os.path.join(HERE, "usmap", "SDK_Mappings.usmap"),
+                 os.path.join(str(RES_DIR), "usmap", "SDK_Mappings.usmap")) if os.path.exists(p)),
+    os.path.join(HERE, "usmap", "SDK_Mappings.usmap"))
 SCHEMAS = [USMAP] + [p for p in os.environ.get("USMAP_EXTRA", "").split(os.pathsep) if p]
 
 FREAL = 8                     # large world coordinates: FReal = double

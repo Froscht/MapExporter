@@ -14,3 +14,7 @@ arcpak/settings.json
 arcpak/*.pdb
 arcpak/*.lib
 arcpak/*.exp
+
+# Build (venv + Nuitka work dirs) and the built MapExporter.exe
+build/
+release/

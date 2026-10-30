@@ -44,7 +44,8 @@ The API is run(); main() is the CLI entry point. Run state lives in the module g
 reset by run(), so one process can export several maps in a row (tools/mapexport.py karte).
 """
 import sys, os, json, collections
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from .config import APP_DIR
+HERE = str(APP_DIR)            # writable root (repo, or the folder of MapExporter.exe)
 from . import game, gltf as gltf_mod, iostore, mesh, uetransform as ut, zen
 from .config import report_progress
 from .game import native_start

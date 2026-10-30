@@ -22,9 +22,9 @@ from dataclasses import dataclass, field
 
 from . import game, gltf, iostore, mesh, zen
 from . import uetransform as ut
-from .config import report_progress
+from .config import APP_DIR, report_progress
 
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = str(APP_DIR)            # writable root (repo, or the folder of MapExporter.exe)
 OUT_DIR = os.path.join(HERE, "out", "models")
 CONTENT = "../../../PioneerGame/Content/"
 BODY = "/Game/Pioneer/Characters/Shared/Bodies/SK_Body"
